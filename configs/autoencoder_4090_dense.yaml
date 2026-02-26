@@ -34,11 +34,11 @@ optimizer:
 runtime:
   device: cuda
   amp: true
-  num_workers: 12
+  num_workers: 8
   pin_memory: true
 
 checkpoint:
-  save_every: 10
+  save_every: 100
 
 loss:
   chamfer: 1.0

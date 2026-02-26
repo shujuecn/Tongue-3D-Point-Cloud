@@ -13,7 +13,7 @@ def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
 
 
 def load_checkpoint(path: Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    return torch.load(path, map_location=map_location)
+    return torch.load(path, map_location=map_location, weights_only=True)
 
 
 def save_normalization(path: Path, center: list[float], scale: float) -> None:
