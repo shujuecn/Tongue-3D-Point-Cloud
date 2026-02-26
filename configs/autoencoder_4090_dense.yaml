@@ -2,7 +2,7 @@ experiment_name: ae_4090_dense
 output_dir: runs/ae_4090_dense
 seed: 42
 epochs: 220
-batch_size: 6
+batch_size: 8
 grad_accum_steps: 2
 grad_clip_norm: 1.0
 
