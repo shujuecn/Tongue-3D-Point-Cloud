@@ -50,6 +50,7 @@ def main() -> None:
         scale=scale,
         augment=False,
         preload_meshes=dataset_cfg.preload_meshes,
+        deterministic_sampling=True,
     )
     loader = make_loader(
         ds,

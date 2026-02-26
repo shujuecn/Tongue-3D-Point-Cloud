@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -72,15 +73,25 @@ class TonguePointCloudDataset(Dataset):
         center: np.ndarray,
         scale: float,
         preload_meshes: bool | None = None,
+        deterministic_sampling: bool = False,
     ) -> None:
         self.samples = samples
         self.dataset_cfg = dataset_cfg
         self.center = center.astype(np.float32)
         self.scale = float(scale)
         self.preload_meshes = dataset_cfg.preload_meshes if preload_meshes is None else preload_meshes
+        self.deterministic_sampling = deterministic_sampling
 
         if self.preload_meshes:
-            for sample in self.samples:
+            iterator = self.samples
+            try:
+                from tqdm import tqdm
+
+                iterator = tqdm(self.samples, desc="preload-meshes", leave=False)
+            except Exception:
+                pass
+
+            for sample in iterator:
                 key = str(sample.mesh_path)
                 if key not in _MeshCache.storage:
                     _MeshCache.storage[key] = load_obj(sample.mesh_path)
@@ -101,7 +112,18 @@ class TonguePointCloudDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self.samples[idx]
         vertices, faces = self._load_mesh(sample.mesh_path)
-        points, normals = sample_points_from_mesh(vertices, faces, self.dataset_cfg.num_points)
+
+        rng = None
+        if self.deterministic_sampling:
+            seed = stable_seed_from_string(sample.sample_id)
+            rng = np.random.default_rng(seed)
+
+        points, normals = sample_points_from_mesh(
+            vertices,
+            faces,
+            self.dataset_cfg.num_points,
+            rng=rng,
+        )
         points = normalize_points(points, self.center, self.scale)
 
         return {
@@ -120,8 +142,16 @@ class TongueImagePointDataset(TonguePointCloudDataset):
         scale: float,
         augment: bool,
         preload_meshes: bool | None = None,
+        deterministic_sampling: bool = False,
     ) -> None:
-        super().__init__(samples, dataset_cfg, center, scale, preload_meshes=preload_meshes)
+        super().__init__(
+            samples,
+            dataset_cfg,
+            center,
+            scale,
+            preload_meshes=preload_meshes,
+            deterministic_sampling=deterministic_sampling,
+        )
         self.transform = build_image_transform(dataset_cfg.image_size, augment)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
@@ -134,3 +164,8 @@ class TongueImagePointDataset(TonguePointCloudDataset):
 
         out["image"] = image_tensor
         return out
+
+
+def stable_seed_from_string(value: str) -> int:
+    digest = hashlib.sha256(value.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**32)

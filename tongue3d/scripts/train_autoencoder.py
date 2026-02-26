@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import torch
-from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
@@ -27,10 +25,18 @@ from tongue3d.scripts.common import (
     build_splits,
     compute_train_normalization,
     make_loader,
+    make_grad_scaler,
     maybe_autocast,
     save_normalization_json,
 )
-from tongue3d.utils import save_checkpoint, seed_everything
+from tongue3d.utils import (
+    denormalize_points,
+    has_matplotlib,
+    save_autoencoder_visual,
+    save_checkpoint,
+    seed_everything,
+    write_pointcloud_ply,
+)
 
 
 def compute_loss(
@@ -83,30 +89,34 @@ def run_epoch(model, loader, optimizer, scaler, device: str, cfg, is_train: bool
     }
 
     pbar = tqdm(loader, desc=phase, leave=False)
+    grad_accum = int(cfg.grad_accum_steps)
+    if is_train:
+        optimizer.zero_grad(set_to_none=True)
 
-    for batch in pbar:
+    for step, batch in enumerate(pbar, start=1):
         points = batch["points"].to(device, non_blocking=True).float()
         normals = batch["normals"].to(device, non_blocking=True).float()
-
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
 
         with maybe_autocast(device=device, enabled=cfg.runtime.amp):
             _, recon_points, recon_normals = model(points)
             losses = compute_loss(points, normals, recon_points, recon_normals, cfg)
 
         if is_train:
-            scaler.scale(losses["total"]).backward()
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)
-            scaler.step(optimizer)
-            scaler.update()
+            scaled_loss = losses["total"] / float(grad_accum)
+            scaler.scale(scaled_loss).backward()
+            should_step = (step % grad_accum == 0) or (step == len(loader))
+            if should_step:
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
         bs = points.shape[0]
         for key in meter:
             meter[key] += float(losses[key].detach().item()) * bs
 
-        running = meter["total"] / max(1, (pbar.n + 1) * loader.batch_size)
+        running = meter["total"] / max(1, step * loader.batch_size)
         pbar.set_postfix(total=f"{running:.5f}")
 
     denom = len(loader.dataset)
@@ -136,6 +146,7 @@ def main() -> None:
         center=center,
         scale=scale,
         preload_meshes=cfg.dataset.preload_meshes,
+        deterministic_sampling=False,
     )
     val_ds = TonguePointCloudDataset(
         samples=splits["val"],
@@ -143,6 +154,7 @@ def main() -> None:
         center=center,
         scale=scale,
         preload_meshes=cfg.dataset.preload_meshes,
+        deterministic_sampling=True,
     )
 
     train_loader = make_loader(train_ds, cfg.batch_size, shuffle=True, runtime_cfg=cfg.runtime)
@@ -162,7 +174,7 @@ def main() -> None:
         weight_decay=cfg.optimizer.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
-    scaler = GradScaler(enabled=(cfg.runtime.amp and device.startswith("cuda")))
+    scaler = make_grad_scaler(device=device, enabled=cfg.runtime.amp)
 
     best_val = math.inf
 
@@ -208,9 +220,70 @@ def main() -> None:
         if epoch % cfg.checkpoint.save_every == 0:
             save_checkpoint(cfg.output_dir / f"epoch_{epoch:03d}.pt", payload)
 
-        if val_metrics["total"] < best_val:
-            best_val = val_metrics["total"]
+        if val_metrics["chamfer"] < best_val:
+            best_val = val_metrics["chamfer"]
             save_checkpoint(cfg.output_dir / "best.pt", payload)
+
+        if (
+            cfg.visualization.enabled
+            and epoch % cfg.visualization.every_n_epochs == 0
+            and has_matplotlib()
+        ):
+            save_autoencoder_snapshot(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+                output_dir=cfg.output_dir,
+                epoch=epoch,
+                center=center,
+                scale=scale,
+                num_samples=cfg.visualization.num_samples,
+                max_points=cfg.visualization.max_points,
+                save_ply=cfg.visualization.save_ply,
+            )
+
+
+def save_autoencoder_snapshot(
+    model,
+    val_loader,
+    device: str,
+    output_dir,
+    epoch: int,
+    center,
+    scale: float,
+    num_samples: int,
+    max_points: int,
+    save_ply: bool,
+) -> None:
+    model.eval()
+    batch = next(iter(val_loader))
+    points = batch["points"][:num_samples].to(device, non_blocking=True).float()
+    sample_ids = batch["sample_id"][:num_samples]
+
+    with torch.no_grad():
+        _, pred_points, _ = model(points)
+
+    vis_dir = output_dir / "visuals" / f"epoch_{epoch:03d}"
+    vis_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(points.shape[0]):
+        sid = str(sample_ids[i])
+        gt_i = points[i].detach().cpu()
+        pred_i = pred_points[i].detach().cpu()
+
+        save_autoencoder_visual(
+            out_path=vis_dir / f"{sid}_ae.png",
+            gt_points=gt_i,
+            pred_points=pred_i,
+            sample_id=sid,
+            max_points=max_points,
+        )
+
+        if save_ply:
+            gt_denorm = denormalize_points(gt_i.numpy(), center=center, scale=scale)
+            pred_denorm = denormalize_points(pred_i.numpy(), center=center, scale=scale)
+            write_pointcloud_ply(vis_dir / f"{sid}_gt.ply", gt_denorm)
+            write_pointcloud_ply(vis_dir / f"{sid}_pred.ply", pred_denorm)
 
 
 if __name__ == "__main__":

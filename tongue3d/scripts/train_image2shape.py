@@ -4,7 +4,6 @@ import math
 import numpy as np
 
 import torch
-from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
@@ -22,14 +21,23 @@ from tongue3d.losses import (
     laplacian_smoothness_loss,
     normal_alignment_loss,
 )
-from tongue3d.models import TongueImageToShape, TonguePointAutoEncoder
+from tongue3d.models import TongueImageToShape, TonguePointAutoEncoder, has_torchvision
 from tongue3d.scripts.common import (
     build_splits,
     make_loader,
+    make_grad_scaler,
     maybe_autocast,
     save_normalization_json,
 )
-from tongue3d.utils import load_checkpoint, seed_everything, save_checkpoint
+from tongue3d.utils import (
+    denormalize_points,
+    has_matplotlib,
+    load_checkpoint,
+    save_checkpoint,
+    save_image2shape_visual,
+    seed_everything,
+    write_pointcloud_ply,
+)
 
 
 def compute_loss(
@@ -90,14 +98,14 @@ def run_epoch(model, ae, loader, optimizer, scaler, device: str, cfg, is_train: 
     }
 
     pbar = tqdm(loader, desc=phase, leave=False)
+    grad_accum = int(cfg.grad_accum_steps)
+    if is_train:
+        optimizer.zero_grad(set_to_none=True)
 
-    for batch in pbar:
+    for step, batch in enumerate(pbar, start=1):
         images = batch["image"].to(device, non_blocking=True).float()
         points = batch["points"].to(device, non_blocking=True).float()
         normals = batch["normals"].to(device, non_blocking=True).float()
-
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
 
         with torch.no_grad():
             target_latent = ae.encode(points)
@@ -115,24 +123,60 @@ def run_epoch(model, ae, loader, optimizer, scaler, device: str, cfg, is_train: 
             )
 
         if is_train:
-            scaler.scale(losses["total"]).backward()
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
-                cfg.grad_clip_norm,
-            )
-            scaler.step(optimizer)
-            scaler.update()
+            scaled_loss = losses["total"] / float(grad_accum)
+            scaler.scale(scaled_loss).backward()
+            should_step = (step % grad_accum == 0) or (step == len(loader))
+            if should_step:
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    cfg.grad_clip_norm,
+                )
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
         bs = points.shape[0]
         for key in meter:
             meter[key] += float(losses[key].detach().item()) * bs
 
-        running = meter["total"] / max(1, (pbar.n + 1) * loader.batch_size)
+        running = meter["total"] / max(1, step * loader.batch_size)
         pbar.set_postfix(total=f"{running:.5f}")
 
     denom = len(loader.dataset)
     return {k: v / max(1, denom) for k, v in meter.items()}
+
+
+def build_optimizer(model: TongueImageToShape, cfg):
+    if cfg.freeze_decoder:
+        for param in model.decoder.parameters():
+            param.requires_grad = False
+        params = [p for p in model.parameters() if p.requires_grad]
+        return torch.optim.AdamW(
+            params,
+            lr=cfg.optimizer.lr,
+            betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
+            weight_decay=cfg.optimizer.weight_decay,
+        )
+
+    encoder_params = [p for p in model.image_encoder.parameters() if p.requires_grad]
+    mapper_params = [p for p in model.mapper.parameters() if p.requires_grad]
+    decoder_params = [p for p in model.decoder.parameters() if p.requires_grad]
+    if len(decoder_params) == 0:
+        raise RuntimeError(
+            "freeze_decoder=False but decoder has no trainable parameters. "
+            "Check parameter freezing logic."
+        )
+
+    param_groups = [
+        {"params": encoder_params + mapper_params, "lr": cfg.optimizer.lr},
+        {"params": decoder_params, "lr": cfg.optimizer.lr * cfg.decoder_lr_scale},
+    ]
+    return torch.optim.AdamW(
+        param_groups,
+        betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
+        weight_decay=cfg.optimizer.weight_decay,
+    )
 
 
 def main() -> None:
@@ -141,6 +185,12 @@ def main() -> None:
 
     ensure_output_dir(cfg.output_dir)
     save_config_json(cfg.output_dir / "config.json", cfg)
+
+    if cfg.require_torchvision and not has_torchvision():
+        raise RuntimeError(
+            "torchvision is required for image-to-shape training. "
+            "Install a torchvision build matching your torch version, then rerun."
+        )
 
     seed_everything(cfg.seed)
     device = resolve_device(cfg.runtime.device)
@@ -165,6 +215,7 @@ def main() -> None:
         scale=scale,
         augment=cfg.dataset.augment,
         preload_meshes=cfg.dataset.preload_meshes,
+        deterministic_sampling=False,
     )
     val_ds = TongueImagePointDataset(
         samples=splits["val"],
@@ -173,6 +224,7 @@ def main() -> None:
         scale=scale,
         augment=False,
         preload_meshes=cfg.dataset.preload_meshes,
+        deterministic_sampling=True,
     )
 
     train_loader = make_loader(train_ds, cfg.batch_size, shuffle=True, runtime_cfg=cfg.runtime)
@@ -200,19 +252,13 @@ def main() -> None:
         decoder=ae_model.decoder,
     ).to(device)
 
-    if cfg.freeze_decoder:
+    if not cfg.freeze_decoder:
         for param in model.decoder.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
-    optim_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        optim_params,
-        lr=cfg.optimizer.lr,
-        betas=(cfg.optimizer.beta1, cfg.optimizer.beta2),
-        weight_decay=cfg.optimizer.weight_decay,
-    )
+    optimizer = build_optimizer(model, cfg)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
-    scaler = GradScaler(enabled=(cfg.runtime.amp and device.startswith("cuda")))
+    scaler = make_grad_scaler(device=device, enabled=cfg.runtime.amp)
 
     best_val = math.inf
 
@@ -224,9 +270,11 @@ def main() -> None:
         scheduler.step()
 
         lr = optimizer.param_groups[0]["lr"]
+        decoder_lr = optimizer.param_groups[-1]["lr"]
         print(
             f"Epoch {epoch:03d}/{cfg.epochs} "
             f"lr={lr:.3e} "
+            f"dec_lr={decoder_lr:.3e} "
             f"train_total={train_metrics['total']:.6f} "
             f"val_total={val_metrics['total']:.6f} "
             f"val_cd={val_metrics['chamfer']:.6f}"
@@ -259,9 +307,74 @@ def main() -> None:
         if epoch % cfg.checkpoint.save_every == 0:
             save_checkpoint(cfg.output_dir / f"epoch_{epoch:03d}.pt", payload)
 
-        if val_metrics["total"] < best_val:
-            best_val = val_metrics["total"]
+        if val_metrics["chamfer"] < best_val:
+            best_val = val_metrics["chamfer"]
             save_checkpoint(cfg.output_dir / "best.pt", payload)
+
+        if (
+            cfg.visualization.enabled
+            and epoch % cfg.visualization.every_n_epochs == 0
+            and has_matplotlib()
+        ):
+            save_image2shape_snapshot(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+                output_dir=cfg.output_dir,
+                epoch=epoch,
+                center=center,
+                scale=scale,
+                num_samples=cfg.visualization.num_samples,
+                max_points=cfg.visualization.max_points,
+                save_ply=cfg.visualization.save_ply,
+            )
+
+
+def save_image2shape_snapshot(
+    model,
+    val_loader,
+    device: str,
+    output_dir,
+    epoch: int,
+    center,
+    scale: float,
+    num_samples: int,
+    max_points: int,
+    save_ply: bool,
+) -> None:
+    model.eval()
+    batch = next(iter(val_loader))
+
+    images = batch["image"][:num_samples].to(device, non_blocking=True).float()
+    points = batch["points"][:num_samples].to(device, non_blocking=True).float()
+    sample_ids = batch["sample_id"][:num_samples]
+
+    with torch.no_grad():
+        _, pred_points, _ = model(images)
+
+    vis_dir = output_dir / "visuals" / f"epoch_{epoch:03d}"
+    vis_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(points.shape[0]):
+        sid = str(sample_ids[i])
+        img_i = images[i].detach().cpu()
+        gt_i = points[i].detach().cpu()
+        pred_i = pred_points[i].detach().cpu()
+
+        save_image2shape_visual(
+            out_path=vis_dir / f"{sid}_img2shape.png",
+            image=img_i,
+            gt_points=gt_i,
+            pred_points=pred_i,
+            sample_id=sid,
+            max_points=max_points,
+        )
+
+        if save_ply:
+            gt_denorm = denormalize_points(gt_i.numpy(), center=center, scale=scale)
+            pred_denorm = denormalize_points(pred_i.numpy(), center=center, scale=scale)
+            write_pointcloud_ply(vis_dir / f"{sid}_gt.ply", gt_denorm)
+            write_pointcloud_ply(vis_dir / f"{sid}_pred.ply", pred_denorm)
 
 
 if __name__ == "__main__":

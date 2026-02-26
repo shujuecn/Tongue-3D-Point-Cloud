@@ -64,6 +64,14 @@ class CheckpointConfig(BaseModel):
     save_every: int = 5
 
 
+class VisualizationConfig(BaseModel):
+    enabled: bool = True
+    every_n_epochs: int = Field(default=50, ge=1)
+    num_samples: int = Field(default=2, ge=1, le=8)
+    max_points: int = Field(default=4096, ge=256)
+    save_ply: bool = True
+
+
 class AutoencoderLossConfig(BaseModel):
     chamfer: float = 1.0
     chamfer_chunk_size: int = Field(default=0, ge=0)
@@ -87,6 +95,7 @@ class AutoencoderTrainConfig(BaseModel):
     seed: int = 42
     epochs: int = 160
     batch_size: int = 16
+    grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float = 1.0
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)
@@ -95,6 +104,7 @@ class AutoencoderTrainConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     loss: AutoencoderLossConfig = Field(default_factory=AutoencoderLossConfig)
+    visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
 
 
 class Image2ShapeTrainConfig(BaseModel):
@@ -103,9 +113,12 @@ class Image2ShapeTrainConfig(BaseModel):
     seed: int = 42
     epochs: int = 120
     batch_size: int = 24
+    grad_accum_steps: int = Field(default=1, ge=1)
     grad_clip_norm: float = 1.0
     autoencoder_checkpoint: Path = Path("runs/ae_baseline/best.pt")
     freeze_decoder: bool = True
+    decoder_lr_scale: float = Field(default=0.25, ge=0.0, le=1.0)
+    require_torchvision: bool = True
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
@@ -113,6 +126,7 @@ class Image2ShapeTrainConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     loss: Image2ShapeLossConfig = Field(default_factory=Image2ShapeLossConfig)
+    visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
 
 
 def load_yaml(path: Path) -> dict:

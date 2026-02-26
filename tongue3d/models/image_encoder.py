@@ -83,3 +83,7 @@ def _fallback_backbone() -> tuple[nn.Module, int]:
         nn.Flatten(start_dim=1),
     )
     return backbone, 512
+
+
+def has_torchvision() -> bool:
+    return _HAS_TORCHVISION

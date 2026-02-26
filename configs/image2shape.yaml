@@ -3,9 +3,12 @@ output_dir: runs/img2shape_baseline
 seed: 42
 epochs: 140
 batch_size: 24
+grad_accum_steps: 1
 grad_clip_norm: 1.0
 autoencoder_checkpoint: runs/ae_baseline/best.pt
 freeze_decoder: true
+decoder_lr_scale: 0.25
+require_torchvision: true
 
 dataset:
   root_dir: TongueDB
@@ -41,6 +44,13 @@ runtime:
 
 checkpoint:
   save_every: 10
+
+visualization:
+  enabled: true
+  every_n_epochs: 50
+  num_samples: 2
+  max_points: 4096
+  save_ply: true
 
 loss:
   chamfer: 1.2

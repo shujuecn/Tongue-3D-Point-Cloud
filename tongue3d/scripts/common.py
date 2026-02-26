@@ -57,3 +57,12 @@ def maybe_autocast(device: str, enabled: bool):
     if device.startswith("cuda"):
         return torch.autocast(device_type="cuda", enabled=True)
     return torch.autocast(device_type="cpu", enabled=False)
+
+
+def make_grad_scaler(device: str, enabled: bool):
+    scaler_enabled = bool(enabled and device.startswith("cuda"))
+    scaler_device = "cuda" if device.startswith("cuda") else "cpu"
+
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler(device=scaler_device, enabled=scaler_enabled)
+    return torch.cuda.amp.GradScaler(enabled=scaler_enabled)

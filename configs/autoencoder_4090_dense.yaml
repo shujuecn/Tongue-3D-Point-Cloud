@@ -2,7 +2,8 @@ experiment_name: ae_4090_dense
 output_dir: runs/ae_4090_dense
 seed: 42
 epochs: 220
-batch_size: 8
+batch_size: 6
+grad_accum_steps: 2
 grad_clip_norm: 1.0
 
 dataset:
@@ -34,11 +35,18 @@ optimizer:
 runtime:
   device: cuda
   amp: true
-  num_workers: 8
+  num_workers: 12
   pin_memory: true
 
 checkpoint:
-  save_every: 100
+  save_every: 10
+
+visualization:
+  enabled: true
+  every_n_epochs: 50
+  num_samples: 2
+  max_points: 4096
+  save_ply: true
 
 loss:
   chamfer: 1.0

@@ -23,6 +23,7 @@ Because the paper's original release does not include UHM rigged PCA assets or o
 - `tongue3d/scripts/train_autoencoder.py`: stage-1 training
 - `tongue3d/scripts/train_image2shape.py`: stage-2 training
 - `tongue3d/scripts/infer_single.py`: single-image inference to `.ply`
+- `tongue3d/scripts/visualize_compare.py`: quick GT OBJ vs predicted PLY comparison image
 - `configs/autoencoder.yaml`
 - `configs/image2shape.yaml`
 
@@ -40,6 +41,8 @@ The loader pairs samples by filename stem.
 ```bash
 pip install -r requirements.txt
 ```
+
+`train_image2shape` requires `torchvision` (ResNet-50 backbone). If `torchvision` is missing, training now exits with an explicit error.
 
 ## Training
 
@@ -69,6 +72,7 @@ Outputs under `runs/ae_baseline/`:
 - `last.pt`
 - `normalization.json`
 - `config.json`
+- `visuals/epoch_050/*` (if visualization is enabled)
 
 ### Stage 2: image -> 3D
 
@@ -85,11 +89,18 @@ python -m tongue3d.scripts.train_image2shape configs/image2shape_4090_dense.yaml
 ```
 
 Outputs under `runs/img2shape_baseline/`.
+- `visuals/epoch_050/*` (every 50 epochs by default)
 
 ## Inference
 
 ```bash
 python -m tongue3d.scripts.infer_single runs/img2shape_baseline/best.pt TongueDB/images/04017.000055.png runs/predictions/04017.000055.ply
+```
+
+## Quick comparison visualization
+
+```bash
+python -m tongue3d.scripts.visualize_compare TongueDB/meshes/03903.000052.obj runs/predictions/03903.000052_dense.ply runs/compare/03903_compare.png
 ```
 
 ## Notes on paper alignment
@@ -115,3 +126,5 @@ For denser reconstruction close to your mesh vertex density:
 - use `configs/autoencoder_4090_dense.yaml` and `configs/image2shape_4090_dense.yaml`
 - output is `8192` points per sample
 - Chamfer uses chunking (`chamfer_chunk_size: 2048`) to control memory
+- effective batch size is increased by `grad_accum_steps: 2`
+- stage-2 trains the decoder with a smaller LR (`decoder_lr_scale`) instead of fully freezing it
