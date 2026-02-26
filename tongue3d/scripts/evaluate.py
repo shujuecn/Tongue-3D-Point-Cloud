@@ -78,7 +78,11 @@ def main() -> None:
             images = batch["image"].to(device, non_blocking=True).float()
             points = batch["points"].to(device, non_blocking=True).float()
             _, pred_points, _ = model(images)
-            cd = chamfer_distance(pred_points, points)
+            cd = chamfer_distance(
+                pred_points,
+                points,
+                chunk_size=int(cfg["loss"].get("chamfer_chunk_size", 0)),
+            )
             total_cd += float(cd.item()) * points.shape[0]
 
     mean_cd = total_cd / len(ds)

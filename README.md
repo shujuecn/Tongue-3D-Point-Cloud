@@ -57,6 +57,12 @@ TONGUE3D_CONFIG=configs/autoencoder.yaml python -m tongue3d.scripts.train_autoen
 python -m tongue3d.scripts.train_autoencoder configs/autoencoder.yaml
 ```
 
+For RTX 4090 dense output (8192 points):
+
+```bash
+python -m tongue3d.scripts.train_autoencoder configs/autoencoder_4090_dense.yaml
+```
+
 Outputs under `runs/ae_baseline/`:
 
 - `best.pt`
@@ -70,6 +76,12 @@ Edit `configs/image2shape.yaml` `autoencoder_checkpoint` first, then run:
 
 ```bash
 python -m tongue3d.scripts.train_image2shape
+```
+
+For RTX 4090 dense output (8192 points):
+
+```bash
+python -m tongue3d.scripts.train_image2shape configs/image2shape_4090_dense.yaml
 ```
 
 Outputs under `runs/img2shape_baseline/`.
@@ -97,3 +109,9 @@ python -m tongue3d.scripts.infer_single runs/img2shape_baseline/best.pt TongueDB
 - `batch_size: 24` (AMP on)
 - `num_workers: 8`
 - keep `preload_meshes: true` (sufficient with 64GB RAM)
+
+For denser reconstruction close to your mesh vertex density:
+
+- use `configs/autoencoder_4090_dense.yaml` and `configs/image2shape_4090_dense.yaml`
+- output is `8192` points per sample
+- Chamfer uses chunking (`chamfer_chunk_size: 2048`) to control memory

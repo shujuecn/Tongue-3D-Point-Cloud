@@ -45,6 +45,7 @@ def compute_loss(
         pred_points,
         gt_points,
         return_indices=True,
+        chunk_size=cfg.loss.chamfer_chunk_size,
     )
     normal = normal_alignment_loss(
         pred_normals=pred_normals,

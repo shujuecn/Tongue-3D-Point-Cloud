@@ -1,17 +1,15 @@
-experiment_name: img2shape_baseline
-output_dir: runs/img2shape_baseline
+experiment_name: ae_4090_dense
+output_dir: runs/ae_4090_dense
 seed: 42
-epochs: 140
-batch_size: 24
+epochs: 220
+batch_size: 8
 grad_clip_norm: 1.0
-autoencoder_checkpoint: runs/ae_baseline/best.pt
-freeze_decoder: true
 
 dataset:
   root_dir: TongueDB
   image_subdir: images
   mesh_subdir: meshes
-  num_points: 2048
+  num_points: 8192
   image_size: 224
   preload_meshes: true
   augment: true
@@ -24,11 +22,11 @@ split:
 
 model:
   latent_dim: 256
-  decoder_hidden_dim: 1024
-  dropout: 0.2
+  decoder_hidden_dim: 1536
+  dropout: 0.1
 
 optimizer:
-  lr: 0.0001
+  lr: 0.00015
   weight_decay: 0.0001
   beta1: 0.9
   beta2: 0.999
@@ -36,16 +34,15 @@ optimizer:
 runtime:
   device: cuda
   amp: true
-  num_workers: 8
+  num_workers: 12
   pin_memory: true
 
 checkpoint:
   save_every: 10
 
 loss:
-  chamfer: 1.2
-  chamfer_chunk_size: 0
-  normal: 0.05
+  chamfer: 1.0
+  chamfer_chunk_size: 2048
+  normal: 0.1
   laplacian: 0.05
   edge: 0.02
-  latent: 1.5

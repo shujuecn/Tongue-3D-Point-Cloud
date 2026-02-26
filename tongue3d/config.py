@@ -66,6 +66,7 @@ class CheckpointConfig(BaseModel):
 
 class AutoencoderLossConfig(BaseModel):
     chamfer: float = 1.0
+    chamfer_chunk_size: int = Field(default=0, ge=0)
     normal: float = 0.1
     laplacian: float = 0.05
     edge: float = 0.02
@@ -73,6 +74,7 @@ class AutoencoderLossConfig(BaseModel):
 
 class Image2ShapeLossConfig(BaseModel):
     chamfer: float = 1.2
+    chamfer_chunk_size: int = Field(default=0, ge=0)
     normal: float = 0.05
     laplacian: float = 0.05
     edge: float = 0.02
