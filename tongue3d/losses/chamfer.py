@@ -14,43 +14,50 @@ def chamfer_distance(
     return_indices: bool = False,
     chunk_size: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor:
-    if chunk_size and chunk_size > 0:
-        return _chamfer_distance_chunked(
-            pred_points=pred_points,
-            gt_points=gt_points,
-            return_indices=return_indices,
-            chunk_size=chunk_size,
-        )
-
-    return _chamfer_distance_full(
+    loss, _, _, idx_pred_to_gt, idx_gt_to_pred = chamfer_with_neighbors(
         pred_points=pred_points,
         gt_points=gt_points,
-        return_indices=return_indices,
+        chunk_size=chunk_size,
     )
-
-
-def _chamfer_distance_full(
-    pred_points: torch.Tensor,
-    gt_points: torch.Tensor,
-    return_indices: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor:
-    dist = torch.cdist(pred_points, gt_points, p=2)
-    min_pred, idx_pred_to_gt = torch.min(dist, dim=2)
-    min_gt, idx_gt_to_pred = torch.min(dist, dim=1)
-
-    loss = (min_pred.pow(2).mean()) + (min_gt.pow(2).mean())
-
     if return_indices:
         return loss, idx_pred_to_gt, idx_gt_to_pred
     return loss
 
 
-def _chamfer_distance_chunked(
+def chamfer_with_neighbors(
     pred_points: torch.Tensor,
     gt_points: torch.Tensor,
-    return_indices: bool = False,
+    chunk_size: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if chunk_size and chunk_size > 0:
+        return _chamfer_stats_chunked(
+            pred_points=pred_points,
+            gt_points=gt_points,
+            chunk_size=chunk_size,
+        )
+    return _chamfer_stats_full(
+        pred_points=pred_points,
+        gt_points=gt_points,
+    )
+
+
+def _chamfer_stats_full(
+    pred_points: torch.Tensor,
+    gt_points: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    dist = torch.cdist(pred_points, gt_points, p=2)
+    min_pred, idx_pred_to_gt = torch.min(dist, dim=2)
+    min_gt, idx_gt_to_pred = torch.min(dist, dim=1)
+
+    loss = (min_pred.pow(2).mean()) + (min_gt.pow(2).mean())
+    return loss, min_pred, min_gt, idx_pred_to_gt, idx_gt_to_pred
+
+
+def _chamfer_stats_chunked(
+    pred_points: torch.Tensor,
+    gt_points: torch.Tensor,
     chunk_size: int = 2048,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     _, n_pred, _ = pred_points.shape
     _, n_gt, _ = gt_points.shape
 
@@ -76,14 +83,11 @@ def _chamfer_distance_chunked(
 
     min_pred = torch.cat(pred_mins, dim=1)
     min_gt = torch.cat(gt_mins, dim=1)
+    idx_pred_to_gt = torch.cat(pred_indices, dim=1)
+    idx_gt_to_pred = torch.cat(gt_indices, dim=1)
 
     loss = (min_pred.pow(2).mean()) + (min_gt.pow(2).mean())
-
-    if return_indices:
-        idx_pred_to_gt = torch.cat(pred_indices, dim=1)
-        idx_gt_to_pred = torch.cat(gt_indices, dim=1)
-        return loss, idx_pred_to_gt, idx_gt_to_pred
-    return loss
+    return loss, min_pred, min_gt, idx_pred_to_gt, idx_gt_to_pred
 
 
 def normal_alignment_loss(

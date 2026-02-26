@@ -45,8 +45,8 @@ def save_autoencoder_visual(
     ax1 = fig.add_subplot(1, 2, 1, projection="3d")
     ax2 = fig.add_subplot(1, 2, 2, projection="3d")
 
-    _plot_points(ax1, gt, title=f"GT ({sample_id})", color="#1f77b4")
-    _plot_points(ax2, pred, title=f"Reconstruction ({sample_id})", color="#d62728")
+    _plot_points(ax1, gt, title=f"GT ({sample_id})", color="#5d9ad0", style="splat")
+    _plot_points(ax2, pred, title=f"Reconstruction ({sample_id})", color="#5d9ad0", style="splat")
 
     fig.tight_layout()
     fig.savefig(out_path)
@@ -80,10 +80,10 @@ def save_image2shape_visual(
     ax_img.set_title(f"Input ({sample_id})")
     ax_img.axis("off")
 
-    _plot_points(ax_gt, gt, title="GT Surface Points", color="#1f77b4")
+    _plot_points(ax_gt, gt, title="GT Surface Points", color="#5d9ad0", style="splat")
 
-    _plot_points(ax_overlay, gt, title="Overlay GT/Pred", color="#1f77b4", alpha=0.28)
-    _scatter_points(ax_overlay, pred, color="#d62728", alpha=0.55)
+    _plot_points(ax_overlay, gt, title="Overlay GT/Pred", color="#5d9ad0", alpha=0.18, style="splat")
+    _scatter_points(ax_overlay, pred, color="#f28b54", alpha=0.75)
     _set_axes_equal(ax_overlay, np.concatenate([gt, pred], axis=0))
 
     fig.tight_layout()
@@ -112,7 +112,29 @@ def _subsample(points: np.ndarray, max_points: int) -> np.ndarray:
     return points[idx]
 
 
-def _scatter_points(ax, points: np.ndarray, color: str, alpha: float = 0.9) -> None:
+def _scatter_points(ax, points: np.ndarray, color: str, alpha: float = 0.9, style: str = "plain") -> None:
+    if style == "splat":
+        # Layered circles approximate dense Gaussian splat appearance for snapshots.
+        ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            c=color,
+            s=10.0,
+            alpha=min(alpha, 0.12),
+            linewidths=0,
+            depthshade=False,
+        )
+        ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            c=color,
+            s=4.0,
+            alpha=min(alpha + 0.1, 0.32),
+            linewidths=0,
+            depthshade=False,
+        )
     ax.scatter(
         points[:, 0],
         points[:, 1],
@@ -125,8 +147,15 @@ def _scatter_points(ax, points: np.ndarray, color: str, alpha: float = 0.9) -> N
     )
 
 
-def _plot_points(ax, points: np.ndarray, title: str, color: str, alpha: float = 0.9) -> None:
-    _scatter_points(ax, points, color=color, alpha=alpha)
+def _plot_points(
+    ax,
+    points: np.ndarray,
+    title: str,
+    color: str,
+    alpha: float = 0.9,
+    style: str = "plain",
+) -> None:
+    _scatter_points(ax, points, color=color, alpha=alpha, style=style)
     _set_axes_equal(ax, points)
     ax.set_title(title)
     ax.set_xlabel("x")

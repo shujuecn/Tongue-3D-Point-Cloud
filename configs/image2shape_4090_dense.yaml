@@ -14,7 +14,7 @@ dataset:
   root_dir: TongueDB
   image_subdir: images
   mesh_subdir: meshes
-  num_points: 8192
+  num_points: 12288
   image_size: 224
   preload_meshes: true
   augment: true
@@ -41,6 +41,8 @@ runtime:
   amp: true
   num_workers: 8
   pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
 
 checkpoint:
   save_every: 100
@@ -52,10 +54,17 @@ visualization:
   max_points: 4096
   save_ply: true
 
+logging:
+  tensorboard: true
+  metrics_csv: true
+  flush_every_n_steps: 20
+
 loss:
   chamfer: 1.2
   chamfer_chunk_size: 2048
-  normal: 0.05
-  laplacian: 0.05
-  edge: 0.02
-  latent: 1.5
+  fscore_threshold: 0.01
+  normal: 0.08
+  laplacian: 0.08
+  edge: 0.03
+  repulsion: 0.02
+  latent: 1.2

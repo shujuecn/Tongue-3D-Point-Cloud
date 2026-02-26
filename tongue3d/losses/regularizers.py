@@ -43,3 +43,16 @@ def edge_length_regularizer(points: torch.Tensor, k: int = 12, sample_size: int 
 
     mean_length = edge_lengths.mean(dim=2)
     return mean_length.var(dim=1).mean() + edge_lengths.var(dim=2).mean()
+
+
+def repulsion_loss(
+    points: torch.Tensor,
+    k: int = 5,
+    sample_size: int = 1024,
+    h: float = 0.04,
+) -> torch.Tensor:
+    base = _batched_subset(points, sample_size=sample_size)
+    neighbors = _knn_neighbors(base, points, k=k)
+    distances = torch.sqrt(((base.unsqueeze(2) - neighbors) ** 2).sum(dim=-1) + EPS)
+    penalties = torch.exp(-(distances ** 2) / max(h * h, EPS))
+    return penalties.mean()

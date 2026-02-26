@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -13,20 +14,25 @@ from tongue3d.config import (
     resolve_device,
     save_config_json,
 )
-from tongue3d.data import TonguePointCloudDataset
+from tongue3d.data import TonguePointCloudDataset, save_splits_csv
 from tongue3d.losses import (
-    chamfer_distance,
+    chamfer_with_neighbors,
     edge_length_regularizer,
     laplacian_smoothness_loss,
     normal_alignment_loss,
+    repulsion_loss,
 )
 from tongue3d.models import TonguePointAutoEncoder
 from tongue3d.scripts.common import (
+    append_metrics_csv,
     build_splits,
     compute_train_normalization,
-    make_loader,
+    create_run_dir,
+    format_seconds,
     make_grad_scaler,
+    make_loader,
     maybe_autocast,
+    maybe_create_summary_writer,
     save_normalization_json,
 )
 from tongue3d.utils import (
@@ -46,10 +52,9 @@ def compute_loss(
     recon_normals: torch.Tensor,
     cfg,
 ) -> dict[str, torch.Tensor]:
-    chamfer, idx_pred_to_gt, idx_gt_to_pred = chamfer_distance(
+    chamfer, min_pred, min_gt, idx_pred_to_gt, idx_gt_to_pred = chamfer_with_neighbors(
         recon_points,
         points,
-        return_indices=True,
         chunk_size=cfg.loss.chamfer_chunk_size,
     )
     normal = normal_alignment_loss(
@@ -60,12 +65,18 @@ def compute_loss(
     )
     lap = laplacian_smoothness_loss(recon_points)
     edge = edge_length_regularizer(recon_points)
+    repel = repulsion_loss(recon_points)
+    precision = (min_pred <= cfg.loss.fscore_threshold).float().mean()
+    recall = (min_gt <= cfg.loss.fscore_threshold).float().mean()
+    fscore = (2.0 * precision * recall) / (precision + recall + 1e-8)
+    cd_l1 = min_pred.mean() + min_gt.mean()
 
     total = (
         cfg.loss.chamfer * chamfer
         + cfg.loss.normal * normal
         + cfg.loss.laplacian * lap
         + cfg.loss.edge * edge
+        + cfg.loss.repulsion * repel
     )
     return {
         "total": total,
@@ -73,6 +84,11 @@ def compute_loss(
         "normal": normal,
         "laplacian": lap,
         "edge": edge,
+        "repulsion": repel,
+        "cd_l1": cd_l1,
+        "precision": precision,
+        "recall": recall,
+        "fscore": fscore,
     }
 
 
@@ -86,6 +102,11 @@ def run_epoch(model, loader, optimizer, scaler, device: str, cfg, is_train: bool
         "normal": 0.0,
         "laplacian": 0.0,
         "edge": 0.0,
+        "repulsion": 0.0,
+        "cd_l1": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "fscore": 0.0,
     }
 
     pbar = tqdm(loader, desc=phase, leave=False)
@@ -128,7 +149,8 @@ def main() -> None:
     cfg = load_autoencoder_config(config_path)
 
     ensure_output_dir(cfg.output_dir)
-    save_config_json(cfg.output_dir / "config.json", cfg)
+    run_dir = create_run_dir(cfg.output_dir, cfg.experiment_name)
+    save_config_json(run_dir / "config.json", cfg)
 
     seed_everything(cfg.seed)
     device = resolve_device(cfg.runtime.device)
@@ -137,8 +159,10 @@ def main() -> None:
     if len(splits["train"]) == 0 or len(splits["val"]) == 0:
         raise ValueError("Dataset split produced empty train or val set")
 
+    save_splits_csv(splits, run_dir / "splits.csv")
+
     center, scale = compute_train_normalization(splits["train"])
-    save_normalization_json(cfg.output_dir / "normalization.json", center, scale)
+    save_normalization_json(run_dir / "normalization.json", center, scale)
 
     train_ds = TonguePointCloudDataset(
         samples=splits["train"],
@@ -176,14 +200,25 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
     scaler = make_grad_scaler(device=device, enabled=cfg.runtime.amp)
 
+    tb_writer = maybe_create_summary_writer(
+        log_dir=run_dir / "tensorboard",
+        enabled=cfg.logging.tensorboard,
+    )
+    metrics_csv_path = run_dir / "metrics.csv"
+
     best_val = math.inf
+    train_start = time.perf_counter()
 
     for epoch in range(1, cfg.epochs + 1):
+        epoch_start = time.perf_counter()
+
         train_metrics = run_epoch(model, train_loader, optimizer, scaler, device, cfg, is_train=True)
         with torch.no_grad():
             val_metrics = run_epoch(model, val_loader, optimizer, scaler, device, cfg, is_train=False)
 
         scheduler.step()
+        epoch_sec = time.perf_counter() - epoch_start
+        elapsed_sec = time.perf_counter() - train_start
 
         lr = optimizer.param_groups[0]["lr"]
         print(
@@ -191,8 +226,48 @@ def main() -> None:
             f"lr={lr:.3e} "
             f"train_total={train_metrics['total']:.6f} "
             f"val_total={val_metrics['total']:.6f} "
-            f"val_cd={val_metrics['chamfer']:.6f}"
+            f"val_cd_l2={val_metrics['chamfer']:.6f} "
+            f"val_cd_l1={val_metrics['cd_l1']:.6f} "
+            f"val_f1={val_metrics['fscore']:.4f} "
+            f"epoch={format_seconds(epoch_sec)} elapsed={format_seconds(elapsed_sec)}"
         )
+
+        row = {
+            "epoch": epoch,
+            "lr": lr,
+            "epoch_sec": round(epoch_sec, 4),
+            "elapsed_sec": round(elapsed_sec, 4),
+            "train_total": train_metrics["total"],
+            "train_chamfer": train_metrics["chamfer"],
+            "train_normal": train_metrics["normal"],
+            "train_laplacian": train_metrics["laplacian"],
+            "train_edge": train_metrics["edge"],
+            "train_repulsion": train_metrics["repulsion"],
+            "train_cd_l1": train_metrics["cd_l1"],
+            "train_precision": train_metrics["precision"],
+            "train_recall": train_metrics["recall"],
+            "train_fscore": train_metrics["fscore"],
+            "val_total": val_metrics["total"],
+            "val_chamfer": val_metrics["chamfer"],
+            "val_normal": val_metrics["normal"],
+            "val_laplacian": val_metrics["laplacian"],
+            "val_edge": val_metrics["edge"],
+            "val_repulsion": val_metrics["repulsion"],
+            "val_cd_l1": val_metrics["cd_l1"],
+            "val_precision": val_metrics["precision"],
+            "val_recall": val_metrics["recall"],
+            "val_fscore": val_metrics["fscore"],
+        }
+        if cfg.logging.metrics_csv:
+            append_metrics_csv(metrics_csv_path, row)
+
+        if tb_writer is not None:
+            for key in train_metrics.keys():
+                tb_writer.add_scalars(f"loss/{key}", {"train": train_metrics[key], "val": val_metrics[key]}, epoch)
+            tb_writer.add_scalar("lr/main", lr, epoch)
+            tb_writer.add_scalar("time/epoch_sec", epoch_sec, epoch)
+            tb_writer.add_scalar("time/elapsed_sec", elapsed_sec, epoch)
+            tb_writer.flush()
 
         payload = {
             "epoch": epoch,
@@ -213,15 +288,18 @@ def main() -> None:
                 "train": train_metrics,
                 "val": val_metrics,
             },
+            "run_dir": str(run_dir),
         }
 
+        save_checkpoint(run_dir / "last.pt", payload)
         save_checkpoint(cfg.output_dir / "last.pt", payload)
 
         if epoch % cfg.checkpoint.save_every == 0:
-            save_checkpoint(cfg.output_dir / f"epoch_{epoch:03d}.pt", payload)
+            save_checkpoint(run_dir / f"epoch_{epoch:03d}.pt", payload)
 
         if val_metrics["chamfer"] < best_val:
             best_val = val_metrics["chamfer"]
+            save_checkpoint(run_dir / "best.pt", payload)
             save_checkpoint(cfg.output_dir / "best.pt", payload)
 
         if (
@@ -233,7 +311,7 @@ def main() -> None:
                 model=model,
                 val_loader=val_loader,
                 device=device,
-                output_dir=cfg.output_dir,
+                run_dir=run_dir,
                 epoch=epoch,
                 center=center,
                 scale=scale,
@@ -242,12 +320,17 @@ def main() -> None:
                 save_ply=cfg.visualization.save_ply,
             )
 
+    if tb_writer is not None:
+        tb_writer.close()
+
+    print(f"[done] run_dir={run_dir}")
+
 
 def save_autoencoder_snapshot(
     model,
     val_loader,
     device: str,
-    output_dir,
+    run_dir,
     epoch: int,
     center,
     scale: float,
@@ -263,7 +346,7 @@ def save_autoencoder_snapshot(
     with torch.no_grad():
         _, pred_points, _ = model(points)
 
-    vis_dir = output_dir / "visuals" / f"epoch_{epoch:03d}"
+    vis_dir = run_dir / "visuals" / f"epoch_{epoch:03d}"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
     for i in range(points.shape[0]):

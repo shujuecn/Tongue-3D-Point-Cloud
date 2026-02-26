@@ -68,22 +68,38 @@ def main() -> None:
     ax1 = fig.add_subplot(1, 2, 1, projection="3d")
     ax2 = fig.add_subplot(1, 2, 2, projection="3d")
 
-    ax1.scatter(gt[:, 0], gt[:, 1], gt[:, 2], c="#1f77b4", s=1.2, alpha=0.8, linewidths=0, depthshade=False)
+    _scatter_splat(ax1, gt, color="#5d9ad0")
     set_axes_equal(ax1, gt)
     ax1.set_title(f"GT OBJ ({gt_obj.stem})")
     ax1.view_init(elev=20.0, azim=-65.0)
+    ax1.axis("off")
 
-    ax2.scatter(gt[:, 0], gt[:, 1], gt[:, 2], c="#1f77b4", s=1.2, alpha=0.25, linewidths=0, depthshade=False)
-    ax2.scatter(pred[:, 0], pred[:, 1], pred[:, 2], c="#d62728", s=1.2, alpha=0.55, linewidths=0, depthshade=False)
+    _scatter_splat(ax2, gt, color="#5d9ad0", alpha=0.18)
+    _scatter_splat(ax2, pred, color="#f28b54", alpha=0.7)
     set_axes_equal(ax2, np.concatenate([gt, pred], axis=0))
-    ax2.set_title("Overlay (GT blue / Pred red)")
+    ax2.set_title("Overlay (GT blue / Pred orange)")
     ax2.view_init(elev=20.0, azim=-65.0)
+    ax2.axis("off")
 
     fig.tight_layout()
     fig.savefig(output_png)
     plt.close(fig)
 
     print(f"Saved comparison image: {output_png}")
+
+
+def _scatter_splat(ax, points: np.ndarray, color: str, alpha: float = 0.9) -> None:
+    for size, scale_alpha in ((12.0, 0.10), (4.0, 0.28), (1.2, 1.0)):
+        ax.scatter(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            c=color,
+            s=size,
+            alpha=min(alpha * scale_alpha, 1.0),
+            linewidths=0,
+            depthshade=False,
+        )
 
 
 if __name__ == "__main__":

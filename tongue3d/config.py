@@ -58,6 +58,8 @@ class RuntimeConfig(BaseModel):
     amp: bool = True
     num_workers: int = 8
     pin_memory: bool = True
+    persistent_workers: bool = True
+    prefetch_factor: int = Field(default=2, ge=1)
 
 
 class CheckpointConfig(BaseModel):
@@ -72,20 +74,30 @@ class VisualizationConfig(BaseModel):
     save_ply: bool = True
 
 
+class LoggingConfig(BaseModel):
+    tensorboard: bool = True
+    metrics_csv: bool = True
+    flush_every_n_steps: int = Field(default=20, ge=1)
+
+
 class AutoencoderLossConfig(BaseModel):
     chamfer: float = 1.0
     chamfer_chunk_size: int = Field(default=0, ge=0)
+    fscore_threshold: float = Field(default=0.01, gt=0.0)
     normal: float = 0.1
     laplacian: float = 0.05
     edge: float = 0.02
+    repulsion: float = 0.01
 
 
 class Image2ShapeLossConfig(BaseModel):
     chamfer: float = 1.2
     chamfer_chunk_size: int = Field(default=0, ge=0)
+    fscore_threshold: float = Field(default=0.01, gt=0.0)
     normal: float = 0.05
     laplacian: float = 0.05
     edge: float = 0.02
+    repulsion: float = 0.01
     latent: float = 1.5
 
 
@@ -103,6 +115,7 @@ class AutoencoderTrainConfig(BaseModel):
     optimizer: OptimConfig = Field(default_factory=OptimConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     loss: AutoencoderLossConfig = Field(default_factory=AutoencoderLossConfig)
     visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
 
@@ -125,6 +138,7 @@ class Image2ShapeTrainConfig(BaseModel):
     optimizer: OptimConfig = Field(default_factory=lambda: OptimConfig(lr=2e-4))
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     loss: Image2ShapeLossConfig = Field(default_factory=Image2ShapeLossConfig)
     visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
 
