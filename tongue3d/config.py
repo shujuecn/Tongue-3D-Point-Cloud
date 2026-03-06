@@ -12,10 +12,16 @@ class DatasetConfig(BaseModel):
     root_dir: Path = Path("TongueDB")
     image_subdir: str = "images"
     mesh_subdir: str = "meshes"
+    mask_subdir: str = "masks"
     num_points: int = Field(default=2048, ge=256)
     image_size: int = Field(default=224, ge=128)
     preload_meshes: bool = True
     augment: bool = True
+    use_mask: bool = False
+    mask_crop: bool = True
+    mask_background_zero: bool = True
+    mask_threshold: int = Field(default=127, ge=0, le=255)
+    mask_margin_ratio: float = Field(default=0.08, ge=0.0, le=0.5)
 
     @property
     def image_dir(self) -> Path:
@@ -24,6 +30,10 @@ class DatasetConfig(BaseModel):
     @property
     def mesh_dir(self) -> Path:
         return self.root_dir / self.mesh_subdir
+
+    @property
+    def mask_dir(self) -> Path:
+        return self.root_dir / self.mask_subdir
 
 
 class SplitConfig(BaseModel):
@@ -99,6 +109,16 @@ class Image2ShapeLossConfig(BaseModel):
     edge: float = 0.02
     repulsion: float = 0.01
     latent: float = 1.5
+    in_the_wild_consistency: float = 0.2
+
+
+class InTheWildConfig(BaseModel):
+    enabled: bool = False
+    manifest_csv: Path = Path("TongueDB/in_the_wild_pairs.csv")
+    batch_size: int = Field(default=8, ge=1)
+    start_epoch: int = Field(default=1, ge=1)
+    max_steps_per_epoch: int = Field(default=0, ge=0)
+    use_segmented_mask_preprocess: bool = True
 
 
 class AutoencoderTrainConfig(BaseModel):
@@ -140,6 +160,7 @@ class Image2ShapeTrainConfig(BaseModel):
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     loss: Image2ShapeLossConfig = Field(default_factory=Image2ShapeLossConfig)
+    in_the_wild: InTheWildConfig = Field(default_factory=InTheWildConfig)
     visualization: VisualizationConfig = Field(default_factory=VisualizationConfig)
 
 

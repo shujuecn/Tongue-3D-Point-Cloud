@@ -1,4 +1,10 @@
-from .dataset import TongueImagePointDataset, TonguePointCloudDataset
+from .dataset import (
+    InTheWildPairSample,
+    TongueImagePointDataset,
+    TongueInTheWildPairDataset,
+    TonguePointCloudDataset,
+    load_in_the_wild_manifest,
+)
 from .splits import TongueSample, collect_samples, load_splits_csv, save_splits_csv, split_samples
 
 __all__ = [
@@ -9,4 +15,7 @@ __all__ = [
     "load_splits_csv",
     "TonguePointCloudDataset",
     "TongueImagePointDataset",
+    "InTheWildPairSample",
+    "load_in_the_wild_manifest",
+    "TongueInTheWildPairDataset",
 ]

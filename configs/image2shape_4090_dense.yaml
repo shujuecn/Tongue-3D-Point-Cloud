@@ -14,10 +14,16 @@ dataset:
   root_dir: TongueDB
   image_subdir: images
   mesh_subdir: meshes
+  mask_subdir: masks
   num_points: 8192
   image_size: 224
   preload_meshes: true
   augment: true
+  use_mask: true
+  mask_crop: true
+  mask_background_zero: true
+  mask_threshold: 127
+  mask_margin_ratio: 0.08
 
 split:
   train_ratio: 0.7
@@ -68,3 +74,12 @@ loss:
   edge: 0.03
   repulsion: 0.02
   latent: 1.2
+  in_the_wild_consistency: 0.2
+
+in_the_wild:
+  enabled: true
+  manifest_csv: TongueDB/in_the_wild_pairs.csv
+  batch_size: 8
+  start_epoch: 1
+  max_steps_per_epoch: 0
+  use_segmented_mask_preprocess: true

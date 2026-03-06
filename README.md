@@ -27,11 +27,15 @@ pip install -r requirements.txt
 TongueDB/
   images/*.png
   meshes/*.obj
+  masks/*.png
 ```
 
 通过文件名 stem 自动配对，如：
 - `TongueDB/images/03903.000052.png`
 - `TongueDB/meshes/03903.000052.obj`
+- `TongueDB/masks/03903.000052.png`
+
+其中 `masks/*.png` 是 0/255 舌体 mask（255=舌体区域）。
 
 ## 3. 核心脚本
 
@@ -41,6 +45,7 @@ TongueDB/
 - `tongue3d/scripts/infer_single.py`：单例推理（支持任意 2D 图像路径；也支持 `sample_id + splits.csv`）
 - `tongue3d/scripts/visualize_compare.py`：GT OBJ 与预测 PLY 对比图
 - `tongue3d/scripts/render_blue_splat.py`：论文风格蓝色点状（高斯泼溅感）渲染
+- `tongue3d/scripts/prepare_in_the_wild_pairs.py`：构建 5000+ 真实世界图像配对清单（CSV）
 
 ## 4. `run.sh` 子命令（训练/评估/可视化/推理解耦）
 
@@ -91,6 +96,17 @@ TongueDB/
 ```bash
 ./run.sh visualize TongueDB/meshes/03903.000052.obj runs/predictions/03903.000052_pred.ply runs/compare/03903_compare.png 8192
 ./run.sh render runs/predictions/03903.000052_pred.ply runs/renders/03903_pred_blue_splat.png 12000 1.0
+```
+
+### 4.6 生成 in-the-wild 配对清单（5000+ 数据）
+
+脚本支持 Windows 路径输入，内部会转换成 `/mnt/<盘符>/...` 形式后写入 `TongueDB/in_the_wild_pairs.csv`。
+
+```bash
+./run.sh prepare-wild \
+  "F:\\数据集\\Tongue-250106-5375-ZDWY（241228-ZDWY的修订版）\\1-Tongue-ColorCorrected-250106-5375" \
+  "F:\\数据集\\Tongue-250106-5375-ZDWY（241228-ZDWY的修订版）\\2-Tongue-Segmented-250106-5375" \
+  TongueDB/in_the_wild_pairs.csv
 ```
 
 ## 5. 分阶段直接 Python 调用（等价）
@@ -262,6 +278,10 @@ python -m tongue3d.scripts.render_blue_splat \
 
 这个阶段除了几何损失，还用 `latent loss` 约束预测 latent 接近 AE 的目标 latent。
 
+在当前版本中，阶段二增加了两条与你补充数据对应的训练约束：
+- `TongueDB/masks`：对有 3D 真值的样本做背景抑制与舌体 ROI 裁剪，减少唇部干扰。
+- `in_the_wild consistency`：对 5000+ 无 3D 的真实图像，约束“彩色图”和“分割图”预测 latent 一致，提升跨域稳定性。
+
 ### 13.4 推理时到底用了哪部分
 
 推理使用的是第二阶段 checkpoint（`img2shape` 的 `best.pt`）。  
@@ -314,3 +334,34 @@ python -m tongue3d.scripts.render_blue_splat \
 可以新增 `lip concentration ratio`：
 - 在标注或近似 ROI 下，统计预测点落在嘴唇区域的比例。
 - 该比例过高通常与“嘴唇聚点”现象强相关。
+
+## 16. 用你新增数据的推荐训练流程
+
+### 16.1 先生成 5000+ 配对清单
+
+```bash
+./run.sh prepare-wild "<ColorCorrected目录>" "<Segmented目录>" TongueDB/in_the_wild_pairs.csv
+```
+
+### 16.2 训练 AE（建立 3D 先验）
+
+```bash
+./run.sh train-ae configs/autoencoder_4090_dense.yaml
+```
+
+### 16.3 训练 Image2Shape（mask + 真实世界一致性）
+
+```bash
+./run.sh train-img configs/image2shape_4090_dense.yaml runs/ae_4090_dense/best.pt
+```
+
+### 16.4 这版方案的边界（实事求是）
+
+当前版本不会引入你未提供的监督信息，因此不会强行做：
+- 面部关键点/3DMM 参数监督；
+- 真实世界图像的真值 3D 监督；
+- 论文 TongueGAN 的完整生成器-判别器链路复现。
+
+当前做法是“在已有标注约束内最大化利用数据”：
+- 有 3D 的样本：全监督几何训练；
+- 无 3D 的 5000+ 样本：跨域一致性训练。

@@ -16,7 +16,12 @@ from tongue3d.config import (
     resolve_device,
     save_config_json,
 )
-from tongue3d.data import TongueImagePointDataset, save_splits_csv
+from tongue3d.data import (
+    TongueImagePointDataset,
+    TongueInTheWildPairDataset,
+    load_in_the_wild_manifest,
+    save_splits_csv,
+)
 from tongue3d.losses import (
     chamfer_with_neighbors,
     edge_length_regularizer,
@@ -117,7 +122,19 @@ def compute_loss(
     }
 
 
-def run_epoch(model, ae, loader, optimizer, scaler, device: str, cfg, is_train: bool):
+def run_epoch(
+    model,
+    ae,
+    loader,
+    optimizer,
+    scaler,
+    device: str,
+    cfg,
+    is_train: bool,
+    in_the_wild_loader=None,
+    in_the_wild_weight: float = 0.0,
+    in_the_wild_max_steps: int = 0,
+):
     phase = "train" if is_train else "val"
     model.train(is_train)
     if cfg.freeze_decoder:
@@ -135,10 +152,15 @@ def run_epoch(model, ae, loader, optimizer, scaler, device: str, cfg, is_train: 
         "edge": 0.0,
         "repulsion": 0.0,
         "latent": 0.0,
+        "in_the_wild_consistency": 0.0,
     }
 
     pbar = tqdm(loader, desc=phase, leave=False)
     grad_accum = int(cfg.grad_accum_steps)
+    in_the_wild_iter = (
+        iter(in_the_wild_loader) if (is_train and in_the_wild_loader is not None) else None
+    )
+    in_the_wild_steps = 0
     if is_train:
         optimizer.zero_grad(set_to_none=True)
 
@@ -161,6 +183,31 @@ def run_epoch(model, ae, loader, optimizer, scaler, device: str, cfg, is_train: 
                 gt_normals=normals,
                 cfg=cfg,
             )
+
+        consistency_loss = torch.zeros((), device=images.device, dtype=losses["total"].dtype)
+        if (
+            is_train
+            and in_the_wild_iter is not None
+            and in_the_wild_weight > 0.0
+            and (in_the_wild_max_steps <= 0 or in_the_wild_steps < in_the_wild_max_steps)
+        ):
+            try:
+                iw_batch = next(in_the_wild_iter)
+            except StopIteration:
+                in_the_wild_iter = iter(in_the_wild_loader)
+                iw_batch = next(in_the_wild_iter)
+
+            iw_color = iw_batch["color_image"].to(device, non_blocking=True).float()
+            iw_segmented = iw_batch["segmented_image"].to(device, non_blocking=True).float()
+            with maybe_autocast(device=device, enabled=cfg.runtime.amp):
+                iw_latent_color, _, _ = model(iw_color)
+                iw_latent_segmented, _, _ = model(iw_segmented)
+                consistency_loss = torch.mean((iw_latent_color - iw_latent_segmented) ** 2)
+
+            losses["total"] = losses["total"] + in_the_wild_weight * consistency_loss
+            in_the_wild_steps += 1
+
+        losses["in_the_wild_consistency"] = consistency_loss
 
         if is_train:
             scaled_loss = losses["total"] / float(grad_accum)
@@ -273,6 +320,30 @@ def main() -> None:
 
     train_loader = make_loader(train_ds, cfg.batch_size, shuffle=True, runtime_cfg=cfg.runtime)
     val_loader = make_loader(val_ds, cfg.batch_size, shuffle=False, runtime_cfg=cfg.runtime)
+    in_the_wild_loader = None
+    if cfg.in_the_wild.enabled:
+        if not cfg.in_the_wild.manifest_csv.exists():
+            raise FileNotFoundError(
+                f"in_the_wild.enabled=True but manifest does not exist: {cfg.in_the_wild.manifest_csv}. "
+                "Run: ./run.sh prepare-wild <color_dir> <segmented_dir> [output_csv]"
+            )
+        in_the_wild_samples = load_in_the_wild_manifest(cfg.in_the_wild.manifest_csv)
+        in_the_wild_ds = TongueInTheWildPairDataset(
+            samples=in_the_wild_samples,
+            image_size=cfg.dataset.image_size,
+            augment=cfg.dataset.augment,
+            use_segmented_mask_preprocess=cfg.in_the_wild.use_segmented_mask_preprocess,
+        )
+        in_the_wild_loader = make_loader(
+            in_the_wild_ds,
+            batch_size=cfg.in_the_wild.batch_size,
+            shuffle=True,
+            runtime_cfg=cfg.runtime,
+        )
+        print(
+            f"[in_the_wild] loaded {len(in_the_wild_ds)} samples from {cfg.in_the_wild.manifest_csv} "
+            f"(batch_size={cfg.in_the_wild.batch_size})"
+        )
 
     model_kwargs = ae_ckpt.get("model_kwargs", {})
     ae_model = TonguePointAutoEncoder(
@@ -316,9 +387,35 @@ def main() -> None:
     for epoch in range(1, cfg.epochs + 1):
         epoch_start = time.perf_counter()
 
-        train_metrics = run_epoch(model, ae_model, train_loader, optimizer, scaler, device, cfg, is_train=True)
+        in_the_wild_weight = (
+            float(cfg.loss.in_the_wild_consistency)
+            if cfg.in_the_wild.enabled and epoch >= int(cfg.in_the_wild.start_epoch)
+            else 0.0
+        )
+        train_metrics = run_epoch(
+            model,
+            ae_model,
+            train_loader,
+            optimizer,
+            scaler,
+            device,
+            cfg,
+            is_train=True,
+            in_the_wild_loader=in_the_wild_loader,
+            in_the_wild_weight=in_the_wild_weight,
+            in_the_wild_max_steps=int(cfg.in_the_wild.max_steps_per_epoch),
+        )
         with torch.no_grad():
-            val_metrics = run_epoch(model, ae_model, val_loader, optimizer, scaler, device, cfg, is_train=False)
+            val_metrics = run_epoch(
+                model,
+                ae_model,
+                val_loader,
+                optimizer,
+                scaler,
+                device,
+                cfg,
+                is_train=False,
+            )
 
         scheduler.step()
         epoch_sec = time.perf_counter() - epoch_start
@@ -330,6 +427,7 @@ def main() -> None:
             f"Epoch {epoch:03d}/{cfg.epochs} "
             f"lr={lr:.3e} "
             f"dec_lr={decoder_lr:.3e} "
+            f"iw={in_the_wild_weight:.3e} "
             f"train_total={train_metrics['total']:.6f} "
             f"val_total={val_metrics['total']:.6f} "
             f"val_cd_l2={val_metrics['chamfer']:.6f} "
@@ -355,6 +453,7 @@ def main() -> None:
             "train_edge": train_metrics["edge"],
             "train_repulsion": train_metrics["repulsion"],
             "train_latent": train_metrics["latent"],
+            "train_in_the_wild_consistency": train_metrics["in_the_wild_consistency"],
             "val_total": val_metrics["total"],
             "val_chamfer": val_metrics["chamfer"],
             "val_cd_l1": val_metrics["cd_l1"],
@@ -366,6 +465,7 @@ def main() -> None:
             "val_edge": val_metrics["edge"],
             "val_repulsion": val_metrics["repulsion"],
             "val_latent": val_metrics["latent"],
+            "val_in_the_wild_consistency": val_metrics["in_the_wild_consistency"],
         }
         if cfg.logging.metrics_csv:
             append_metrics_csv(metrics_csv_path, row)
