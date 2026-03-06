@@ -10,7 +10,7 @@ dataset:
   root_dir: TongueDB
   image_subdir: images
   mesh_subdir: meshes
-  num_points: 12288
+  num_points: 8192
   image_size: 224
   preload_meshes: true
   augment: true
@@ -45,7 +45,7 @@ checkpoint:
 
 visualization:
   enabled: true
-  every_n_epochs: 50
+  every_n_epochs: 100
   num_samples: 2
   max_points: 4096
   save_ply: true
