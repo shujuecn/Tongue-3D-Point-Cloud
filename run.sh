@@ -21,6 +21,7 @@ Notes:
   - train-img uses config's autoencoder_checkpoint by default.
   - train-img can override AE checkpoint via the 2nd optional arg.
   - prepare-wild writes a matched manifest CSV under TongueDB by default.
+  - prepare-wild requires /mnt/<drive>/... paths in WSL.
 USAGE
 }
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import re
 import sys
 from pathlib import Path
 
@@ -15,18 +14,24 @@ def parse_cli() -> tuple[Path, Path, Path]:
     color_dir = normalize_input_path(sys.argv[1])
     segmented_dir = normalize_input_path(sys.argv[2])
     output_csv = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("TongueDB/in_the_wild_pairs.csv")
+    validate_mnt_path(color_dir, "color_dir")
+    validate_mnt_path(segmented_dir, "segmented_dir")
     return color_dir, segmented_dir, output_csv
 
 
 def normalize_input_path(raw: str) -> Path:
     s = raw.strip().strip('"').strip("'")
-    # Convert Windows path style to WSL style: F:\foo\bar -> /mnt/f/foo/bar
-    m = re.match(r"^([A-Za-z]):\\(.*)$", s)
-    if m:
-        drive = m.group(1).lower()
-        tail = m.group(2).replace("\\", "/")
-        s = f"/mnt/{drive}/{tail}"
+    s = s.replace("\\", "/")
     return Path(s)
+
+
+def validate_mnt_path(path: Path, name: str) -> None:
+    parts = path.as_posix().split("/")
+    # Expected WSL mount style: /mnt/f/...
+    if len(parts) < 4 or parts[1] != "mnt" or len(parts[2]) != 1 or not parts[2].isalpha():
+        raise ValueError(
+            f"{name} must use WSL mount path style '/mnt/<drive>/...'. Got: {path}"
+        )
 
 
 def collect_images(root: Path) -> dict[str, Path]:
@@ -63,4 +68,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
