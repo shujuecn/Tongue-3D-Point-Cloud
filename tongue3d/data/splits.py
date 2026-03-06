@@ -41,12 +41,26 @@ def split_samples(samples: list[TongueSample], split_cfg: SplitConfig) -> dict[s
     rng.shuffle(ordered)
 
     n = len(ordered)
-    n_train = int(n * split_cfg.train_ratio)
-    n_val = int(n * split_cfg.val_ratio)
+    ratios = [split_cfg.train_ratio, split_cfg.val_ratio, split_cfg.test_ratio]
+    raw_counts = [n * ratio for ratio in ratios]
+    counts = [int(x) for x in raw_counts]
 
+    remainder = n - sum(counts)
+    allocatable = [idx for idx, ratio in enumerate(ratios) if ratio > 0.0]
+    if remainder > 0 and allocatable:
+        # 按最大小数部分分配剩余样本，并在并列时优先更高比例与更前面的 split。
+        order = sorted(
+            allocatable,
+            key=lambda idx: (raw_counts[idx] - counts[idx], ratios[idx], -idx),
+            reverse=True,
+        )
+        for i in range(remainder):
+            counts[order[i % len(order)]] += 1
+
+    n_train, n_val, n_test = counts
     train = ordered[:n_train]
     val = ordered[n_train : n_train + n_val]
-    test = ordered[n_train + n_val :]
+    test = ordered[n_train + n_val : n_train + n_val + n_test]
 
     return {"train": train, "val": val, "test": test}
 

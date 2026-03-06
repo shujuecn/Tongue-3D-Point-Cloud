@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,29 @@ from torch.utils.data import DataLoader
 from tongue3d.config import DatasetConfig, RuntimeConfig, SplitConfig
 from tongue3d.data import collect_samples, split_samples
 from tongue3d.utils.mesh import compute_normalization_stats
+
+
+def _is_wsl() -> bool:
+    try:
+        version_text = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
+    except Exception:
+        return False
+    return "microsoft" in version_text
+
+
+def _resolve_num_workers(requested: int) -> int:
+    if requested <= 0:
+        return 0
+
+    if os.environ.get("TONGUE3D_FORCE_SINGLE_WORKER", "0") == "1":
+        print("[warn] TONGUE3D_FORCE_SINGLE_WORKER=1, force num_workers=0")
+        return 0
+
+    # WSL 上多进程 DataLoader 在部分 torch/cuda 组合下可能触发段错误，默认回退到单进程。
+    if _is_wsl():
+        print("[warn] Detected WSL, fallback num_workers=0 for DataLoader stability")
+        return 0
+    return requested
 
 
 def build_splits(dataset_cfg: DatasetConfig, split_cfg: SplitConfig) -> dict[str, list[Any]]:
@@ -42,15 +66,16 @@ def load_normalization_json(path: Path) -> tuple[np.ndarray, float]:
 
 
 def make_loader(dataset, batch_size: int, shuffle: bool, runtime_cfg: RuntimeConfig) -> DataLoader:
+    num_workers = _resolve_num_workers(int(runtime_cfg.num_workers))
     kwargs: dict[str, Any] = {
         "dataset": dataset,
         "batch_size": batch_size,
         "shuffle": shuffle,
-        "num_workers": runtime_cfg.num_workers,
+        "num_workers": num_workers,
         "pin_memory": runtime_cfg.pin_memory,
         "drop_last": shuffle,
     }
-    if runtime_cfg.num_workers > 0:
+    if num_workers > 0:
         kwargs["persistent_workers"] = runtime_cfg.persistent_workers
         kwargs["prefetch_factor"] = runtime_cfg.prefetch_factor
     return DataLoader(**kwargs)
