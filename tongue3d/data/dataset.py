@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,13 @@ from tongue3d.utils.mesh import load_obj, normalize_points, sample_points_from_m
 
 class _MeshCache:
     storage: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+
+@dataclass(frozen=True)
+class InTheWildPairSample:
+    sample_id: str
+    color_path: Path
+    segmented_path: Path
 
 
 def build_image_transform(image_size: int, augment: bool) -> transforms.Compose:
@@ -153,6 +162,56 @@ class TongueImagePointDataset(TonguePointCloudDataset):
             deterministic_sampling=deterministic_sampling,
         )
         self.transform = build_image_transform(dataset_cfg.image_size, augment)
+        self.mask_map = self._build_mask_map() if dataset_cfg.use_mask else {}
+
+    def _build_mask_map(self) -> dict[str, Path]:
+        mask_dir = self.dataset_cfg.mask_dir
+        if not mask_dir.exists():
+            warnings.warn(
+                f"dataset.use_mask=True but mask directory does not exist: {mask_dir}. "
+                "Fallback to raw images."
+            )
+            return {}
+
+        mask_map = {p.stem: p for p in sorted(mask_dir.glob("*.png"))}
+        if len(mask_map) == 0:
+            warnings.warn(f"No mask files found in: {mask_dir}. Fallback to raw images.")
+        return mask_map
+
+    def _apply_mask_preprocess(self, image: Image.Image, sample_id: str) -> Image.Image:
+        if not self.dataset_cfg.use_mask:
+            return image
+
+        mask_path = self.mask_map.get(sample_id)
+        if mask_path is None or not mask_path.exists():
+            return image
+
+        with Image.open(mask_path) as mask:
+            mask = mask.convert("L")
+            if mask.size != image.size:
+                mask = mask.resize(image.size, resample=Image.NEAREST)
+
+            mask_np = np.asarray(mask, dtype=np.uint8) >= int(self.dataset_cfg.mask_threshold)
+            if not np.any(mask_np):
+                return image
+
+            if self.dataset_cfg.mask_background_zero:
+                image_np = np.asarray(image, dtype=np.uint8).copy()
+                image_np[~mask_np] = 0
+                image = Image.fromarray(image_np, mode="RGB")
+
+            if self.dataset_cfg.mask_crop:
+                ys, xs = np.where(mask_np)
+                x0, x1 = int(xs.min()), int(xs.max())
+                y0, y1 = int(ys.min()), int(ys.max())
+                margin = int(max(image.width, image.height) * float(self.dataset_cfg.mask_margin_ratio))
+                x0 = max(0, x0 - margin)
+                y0 = max(0, y0 - margin)
+                x1 = min(image.width - 1, x1 + margin)
+                y1 = min(image.height - 1, y1 + margin)
+                if x1 > x0 and y1 > y0:
+                    image = image.crop((x0, y0, x1 + 1, y1 + 1))
+        return image
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         out = super().__getitem__(idx)
@@ -160,10 +219,97 @@ class TongueImagePointDataset(TonguePointCloudDataset):
 
         with Image.open(sample.image_path) as image:
             image = image.convert("RGB")
+            image = self._apply_mask_preprocess(image=image, sample_id=sample.sample_id)
             image_tensor = self.transform(image)
 
         out["image"] = image_tensor
         return out
+
+
+def load_in_the_wild_manifest(csv_path: Path) -> list[InTheWildPairSample]:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"In-the-wild manifest not found: {csv_path}")
+
+    samples: list[InTheWildPairSample] = []
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        required = {"sample_id", "color_path", "segmented_path"}
+        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+            raise ValueError(
+                f"Invalid manifest header in {csv_path}. "
+                f"Expected columns: {sorted(required)}"
+            )
+
+        for row in reader:
+            sid = str(row["sample_id"]).strip()
+            color_path = Path(str(row["color_path"]).strip())
+            segmented_path = Path(str(row["segmented_path"]).strip())
+            if not sid or not color_path.exists() or not segmented_path.exists():
+                continue
+            samples.append(
+                InTheWildPairSample(
+                    sample_id=sid,
+                    color_path=color_path,
+                    segmented_path=segmented_path,
+                )
+            )
+    if len(samples) == 0:
+        raise ValueError(f"No valid in-the-wild samples found in manifest: {csv_path}")
+    return samples
+
+
+class TongueInTheWildPairDataset(Dataset):
+    def __init__(
+        self,
+        samples: list[InTheWildPairSample],
+        image_size: int,
+        augment: bool = False,
+        use_segmented_mask_preprocess: bool = True,
+    ) -> None:
+        self.samples = samples
+        self.transform = build_image_transform(image_size=image_size, augment=augment)
+        self.use_segmented_mask_preprocess = bool(use_segmented_mask_preprocess)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    @staticmethod
+    def _mask_from_segmented(segmented_rgb: np.ndarray, threshold: int = 5) -> np.ndarray:
+        gray = segmented_rgb.max(axis=2)
+        return gray >= threshold
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample = self.samples[idx]
+
+        with Image.open(sample.color_path) as color_im:
+            color_im = color_im.convert("RGB")
+            color_np = np.asarray(color_im, dtype=np.uint8)
+
+        with Image.open(sample.segmented_path) as seg_im:
+            seg_im = seg_im.convert("RGB")
+            seg_np = np.asarray(seg_im, dtype=np.uint8)
+
+        if seg_np.shape[:2] != color_np.shape[:2]:
+            seg_np = np.asarray(
+                Image.fromarray(seg_np, mode="RGB").resize(
+                    (color_np.shape[1], color_np.shape[0]),
+                    resample=Image.BILINEAR,
+                ),
+                dtype=np.uint8,
+            )
+
+        if self.use_segmented_mask_preprocess:
+            tongue_mask = self._mask_from_segmented(seg_np)
+            color_np = color_np.copy()
+            color_np[~tongue_mask] = 0
+
+        color_tensor = self.transform(Image.fromarray(color_np, mode="RGB"))
+        segmented_tensor = self.transform(Image.fromarray(seg_np, mode="RGB"))
+        return {
+            "sample_id": sample.sample_id,
+            "color_image": color_tensor,
+            "segmented_image": segmented_tensor,
+        }
 
 
 def stable_seed_from_string(value: str) -> int:

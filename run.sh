@@ -10,6 +10,7 @@ usage() {
 Usage:
   ./run.sh train-ae [ae_config]
   ./run.sh train-img [img_config] [ae_checkpoint]
+  ./run.sh prepare-wild <color_dir> <segmented_dir> [output_csv]
   ./run.sh eval <img2shape_checkpoint> [split=val] [split_csv] [output_json]
   ./run.sh infer <img2shape_checkpoint> <image_path> [output_ply]
   ./run.sh visualize <gt_obj> <pred_ply> [output_png] [max_points=8192]
@@ -19,6 +20,7 @@ Notes:
   - infer is image-path based by design: no split CSV is required.
   - train-img uses config's autoencoder_checkpoint by default.
   - train-img can override AE checkpoint via the 2nd optional arg.
+  - prepare-wild writes a matched manifest CSV under TongueDB by default.
 USAGE
 }
 
@@ -132,6 +134,19 @@ cmd_eval() {
   "${cmd[@]}"
 }
 
+cmd_prepare_wild() {
+  if [[ $# -lt 2 ]]; then
+    echo "[error] prepare-wild requires: <color_dir> <segmented_dir> [output_csv]" >&2
+    usage
+    exit 1
+  fi
+  local color_dir="$1"
+  local segmented_dir="$2"
+  local output_csv="${3:-TongueDB/in_the_wild_pairs.csv}"
+  echo "[prepare-wild] color=$color_dir segmented=$segmented_dir output=$output_csv"
+  python -m tongue3d.scripts.prepare_in_the_wild_pairs "$color_dir" "$segmented_dir" "$output_csv"
+}
+
 cmd_infer() {
   if [[ $# -lt 2 ]]; then
     echo "[error] infer requires: <img2shape_checkpoint> <image_path> [output_ply]" >&2
@@ -206,6 +221,9 @@ main() {
       ;;
     eval)
       cmd_eval "$@"
+      ;;
+    prepare-wild)
+      cmd_prepare_wild "$@"
       ;;
     infer)
       cmd_infer "$@"
