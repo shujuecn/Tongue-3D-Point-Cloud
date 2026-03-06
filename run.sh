@@ -5,10 +5,6 @@ AE_CONFIG_DEFAULT="${AE_CONFIG:-configs/autoencoder_4090_dense.yaml}"
 IMG_CONFIG_DEFAULT="${IMG_CONFIG:-configs/image2shape_4090_dense.yaml}"
 TMP_DIR="${TMP_DIR:-runs/tmp}"
 
-mkdir -p "$TMP_DIR" runs/predictions runs/compare runs/renders
-export MPLCONFIGDIR="${MPLCONFIGDIR:-$TMP_DIR/mplconfig}"
-mkdir -p "$MPLCONFIGDIR"
-
 usage() {
   cat <<'USAGE'
 Usage:
@@ -34,9 +30,22 @@ require_file() {
   fi
 }
 
+# 仅在需要 matplotlib 的命令中初始化缓存目录，避免 infer 时创建无关空目录。
+setup_mpl_runtime() {
+  local mpl_dir="${MPLCONFIGDIR:-$TMP_DIR/mplconfig}"
+  export MPLCONFIGDIR="$mpl_dir"
+  mkdir -p "$mpl_dir"
+}
+
+# 仅在需要写临时配置时创建 TMP_DIR。
+ensure_tmp_dir() {
+  mkdir -p "$TMP_DIR"
+}
+
 build_image2shape_config_with_ae() {
   local img_config="$1"
   local ae_ckpt="$2"
+  ensure_tmp_dir
   local out_cfg="$TMP_DIR/image2shape_effective_$(date +%Y%m%d_%H%M%S).yaml"
 
   python - "$img_config" "$ae_ckpt" "$out_cfg" <<'PY'
@@ -59,6 +68,7 @@ PY
 cmd_train_ae() {
   local ae_config="${1:-$AE_CONFIG_DEFAULT}"
   require_file "$ae_config"
+  setup_mpl_runtime
 
   echo "[train-ae] config=$ae_config"
   python -m tongue3d.scripts.train_autoencoder "$ae_config"
@@ -68,6 +78,7 @@ cmd_train_img() {
   local img_config="${1:-$IMG_CONFIG_DEFAULT}"
   local ae_ckpt="${2:-}"
   require_file "$img_config"
+  setup_mpl_runtime
 
   if [[ -n "$ae_ckpt" ]]; then
     require_file "$ae_ckpt"
@@ -95,6 +106,7 @@ cmd_eval() {
   local output_json=""
   require_file "$ckpt"
 
+  # 兼容：./run.sh eval ckpt val out.json（省略 split_csv）。
   if [[ -n "$third" && -z "$fourth" && "$third" == *.json ]]; then
     output_json="$third"
   else
@@ -155,6 +167,7 @@ cmd_visualize() {
   local max_points="${4:-8192}"
   require_file "$gt_obj"
   require_file "$pred_ply"
+  setup_mpl_runtime
 
   echo "[visualize] gt=$gt_obj pred=$pred_ply"
   python -m tongue3d.scripts.visualize_compare "$gt_obj" "$pred_ply" "$output_png" "$max_points"
@@ -172,6 +185,7 @@ cmd_render() {
   local max_points="${3:-12000}"
   local size_scale="${4:-1.0}"
   require_file "$point_cloud"
+  setup_mpl_runtime
 
   echo "[render] input=$point_cloud"
   python -m tongue3d.scripts.render_blue_splat "$point_cloud" "$output_png" "$max_points" "$size_scale"
