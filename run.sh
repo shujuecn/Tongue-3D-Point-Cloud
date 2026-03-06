@@ -1,123 +1,216 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AE_CONFIG="${AE_CONFIG:-configs/autoencoder_4090_dense.yaml}"
-IMG_CONFIG="${IMG_CONFIG:-configs/image2shape_4090_dense.yaml}"
-SAMPLE_ID="${SAMPLE_ID:-03903.000052}"
+AE_CONFIG_DEFAULT="${AE_CONFIG:-configs/autoencoder_4090_dense.yaml}"
+IMG_CONFIG_DEFAULT="${IMG_CONFIG:-configs/image2shape_4090_dense.yaml}"
+TMP_DIR="${TMP_DIR:-runs/tmp}"
 
-mkdir -p runs/tmp runs/predictions runs/compare runs/renders
-export MPLCONFIGDIR="${MPLCONFIGDIR:-runs/tmp/mplconfig}"
+mkdir -p "$TMP_DIR" runs/predictions runs/compare runs/renders
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$TMP_DIR/mplconfig}"
 mkdir -p "$MPLCONFIGDIR"
 
-if [[ ! -f "$AE_CONFIG" ]]; then
-  echo "[error] AE config not found: $AE_CONFIG" >&2
-  exit 1
-fi
-if [[ ! -f "$IMG_CONFIG" ]]; then
-  echo "[error] IMG2SHAPE config not found: $IMG_CONFIG" >&2
-  exit 1
-fi
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./run.sh train-ae [ae_config]
+  ./run.sh train-img [img_config] [ae_checkpoint]
+  ./run.sh eval <img2shape_checkpoint> [split=val] [split_csv] [output_json]
+  ./run.sh infer <img2shape_checkpoint> <image_path> [output_ply]
+  ./run.sh visualize <gt_obj> <pred_ply> [output_png] [max_points=8192]
+  ./run.sh render <point_cloud.(ply|obj)> [output_png] [max_points=12000] [size_scale=1.0]
 
-echo "[1/6] Train autoencoder with $AE_CONFIG"
-python -m tongue3d.scripts.train_autoencoder "$AE_CONFIG"
+Notes:
+  - infer is image-path based by design: no split CSV is required.
+  - train-img uses config's autoencoder_checkpoint by default.
+  - train-img can override AE checkpoint via the 2nd optional arg.
+USAGE
+}
 
-readarray -t AE_INFO < <(
-python - "$AE_CONFIG" <<'PY'
-from pathlib import Path
-import yaml
-import sys
-cfg_path = Path(sys.argv[1])
-cfg = yaml.safe_load(cfg_path.read_text(encoding='utf-8'))
-out_root = Path(cfg['output_dir'])
-latest_file = out_root / 'latest_run.txt'
-latest = Path(latest_file.read_text(encoding='utf-8').strip()) if latest_file.exists() else out_root
-best = out_root / 'best.pt'
-if not best.exists():
-    best = latest / 'best.pt'
-print(str(out_root))
-print(str(latest))
-print(str(best))
-PY
-)
-AE_ROOT="${AE_INFO[0]}"
-AE_RUN="${AE_INFO[1]}"
-AE_BEST="${AE_INFO[2]}"
+require_file() {
+  local target="$1"
+  if [[ ! -f "$target" ]]; then
+    echo "[error] file not found: $target" >&2
+    exit 1
+  fi
+}
 
-if [[ ! -f "$AE_BEST" ]]; then
-  echo "[error] AE best checkpoint not found: $AE_BEST" >&2
-  exit 1
-fi
+build_image2shape_config_with_ae() {
+  local img_config="$1"
+  local ae_ckpt="$2"
+  local out_cfg="$TMP_DIR/image2shape_effective_$(date +%Y%m%d_%H%M%S).yaml"
 
-IMG_EFFECTIVE_CFG="runs/tmp/image2shape_effective.yaml"
-python - "$IMG_CONFIG" "$AE_BEST" "$IMG_EFFECTIVE_CFG" <<'PY'
+  python - "$img_config" "$ae_ckpt" "$out_cfg" <<'PY'
 from pathlib import Path
 import sys
 import yaml
+
 img_cfg_path = Path(sys.argv[1])
-ae_best = Path(sys.argv[2])
+ae_ckpt = Path(sys.argv[2])
 out_cfg_path = Path(sys.argv[3])
+
 cfg = yaml.safe_load(img_cfg_path.read_text(encoding='utf-8'))
-cfg['autoencoder_checkpoint'] = str(ae_best)
+cfg['autoencoder_checkpoint'] = str(ae_ckpt)
 out_cfg_path.parent.mkdir(parents=True, exist_ok=True)
 out_cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding='utf-8')
 print(out_cfg_path)
 PY
+}
 
-echo "[2/6] Train image2shape with $IMG_EFFECTIVE_CFG"
-python -m tongue3d.scripts.train_image2shape "$IMG_EFFECTIVE_CFG"
+cmd_train_ae() {
+  local ae_config="${1:-$AE_CONFIG_DEFAULT}"
+  require_file "$ae_config"
 
-readarray -t IMG_INFO < <(
-python - "$IMG_EFFECTIVE_CFG" <<'PY'
-from pathlib import Path
-import yaml
-import sys
-cfg_path = Path(sys.argv[1])
-cfg = yaml.safe_load(cfg_path.read_text(encoding='utf-8'))
-out_root = Path(cfg['output_dir'])
-latest_file = out_root / 'latest_run.txt'
-latest = Path(latest_file.read_text(encoding='utf-8').strip()) if latest_file.exists() else out_root
-best = out_root / 'best.pt'
-if not best.exists():
-    best = latest / 'best.pt'
-print(str(out_root))
-print(str(latest))
-print(str(best))
-PY
-)
-IMG_ROOT="${IMG_INFO[0]}"
-IMG_RUN="${IMG_INFO[1]}"
-IMG_BEST="${IMG_INFO[2]}"
+  echo "[train-ae] config=$ae_config"
+  python -m tongue3d.scripts.train_autoencoder "$ae_config"
+}
 
-if [[ ! -f "$IMG_BEST" ]]; then
-  echo "[error] image2shape best checkpoint not found: $IMG_BEST" >&2
-  exit 1
-fi
+cmd_train_img() {
+  local img_config="${1:-$IMG_CONFIG_DEFAULT}"
+  local ae_ckpt="${2:-}"
+  require_file "$img_config"
 
-echo "[3/6] Evaluate val split"
-python -m tongue3d.scripts.evaluate "$IMG_BEST" val "$IMG_RUN/splits.csv" "$IMG_RUN/eval_val.json"
+  if [[ -n "$ae_ckpt" ]]; then
+    require_file "$ae_ckpt"
+    img_config="$(build_image2shape_config_with_ae "$img_config" "$ae_ckpt")"
+    echo "[train-img] override autoencoder_checkpoint=$ae_ckpt"
+    echo "[train-img] effective_config=$img_config"
+  fi
 
-PRED_PLY="runs/predictions/${SAMPLE_ID}_pred.ply"
-GT_OBJ="TongueDB/meshes/${SAMPLE_ID}.obj"
+  echo "[train-img] config=$img_config"
+  python -m tongue3d.scripts.train_image2shape "$img_config"
+}
 
-echo "[4/6] Inference for sample_id=$SAMPLE_ID"
-python -m tongue3d.scripts.infer_single "$IMG_BEST" "$SAMPLE_ID" "$PRED_PLY" "$IMG_RUN/splits.csv"
+cmd_eval() {
+  if [[ $# -lt 1 ]]; then
+    echo "[error] eval requires: <img2shape_checkpoint> [split] [split_csv] [output_json]" >&2
+    usage
+    exit 1
+  fi
 
-if [[ -f "$GT_OBJ" ]]; then
-  echo "[5/6] Render GT/Pred comparison"
-  python -m tongue3d.scripts.visualize_compare "$GT_OBJ" "$PRED_PLY" "runs/compare/${SAMPLE_ID}_compare.png" 8192
-fi
+  local ckpt="$1"
+  local split="${2:-val}"
+  local third="${3:-}"
+  local fourth="${4:-}"
+  local split_csv=""
+  local output_json=""
+  require_file "$ckpt"
 
-echo "[6/6] Render paper-style blue splat"
-python -m tongue3d.scripts.render_blue_splat "$PRED_PLY" "runs/renders/${SAMPLE_ID}_pred_blue_splat.png" 12000 1.0
+  if [[ -n "$third" && -z "$fourth" && "$third" == *.json ]]; then
+    output_json="$third"
+  else
+    split_csv="$third"
+    output_json="$fourth"
+  fi
 
-if [[ -f "$GT_OBJ" ]]; then
-  python -m tongue3d.scripts.render_blue_splat "$GT_OBJ" "runs/renders/${SAMPLE_ID}_gt_blue_splat.png" 12000 1.0
-fi
+  if [[ -n "$split_csv" ]]; then
+    require_file "$split_csv"
+  fi
 
-echo "[done]"
-echo "  AE run:  $AE_RUN"
-echo "  IMG run: $IMG_RUN"
-echo "  Pred:    $PRED_PLY"
-echo "  Compare: runs/compare/${SAMPLE_ID}_compare.png"
-echo "  Render:  runs/renders/${SAMPLE_ID}_pred_blue_splat.png"
-echo "  TensorBoard: tensorboard --logdir $IMG_RUN/tensorboard"
+  local cmd=(python -m tongue3d.scripts.evaluate "$ckpt" "$split")
+  if [[ -n "$split_csv" ]]; then
+    cmd+=("$split_csv")
+  elif [[ -n "$output_json" ]]; then
+    cmd+=("")
+  fi
+  if [[ -n "$output_json" ]]; then
+    cmd+=("$output_json")
+  fi
+
+  echo "[eval] checkpoint=$ckpt split=$split"
+  "${cmd[@]}"
+}
+
+cmd_infer() {
+  if [[ $# -lt 2 ]]; then
+    echo "[error] infer requires: <img2shape_checkpoint> <image_path> [output_ply]" >&2
+    usage
+    exit 1
+  fi
+
+  local ckpt="$1"
+  local image_path="$2"
+  local output_ply="${3:-}"
+  require_file "$ckpt"
+  require_file "$image_path"
+
+  local cmd=(python -m tongue3d.scripts.infer_single "$ckpt" "$image_path")
+  if [[ -n "$output_ply" ]]; then
+    cmd+=("$output_ply")
+  fi
+
+  echo "[infer] checkpoint=$ckpt image=$image_path"
+  "${cmd[@]}"
+}
+
+cmd_visualize() {
+  if [[ $# -lt 2 ]]; then
+    echo "[error] visualize requires: <gt_obj> <pred_ply> [output_png] [max_points]" >&2
+    usage
+    exit 1
+  fi
+
+  local gt_obj="$1"
+  local pred_ply="$2"
+  local output_png="${3:-runs/compare/compare.png}"
+  local max_points="${4:-8192}"
+  require_file "$gt_obj"
+  require_file "$pred_ply"
+
+  echo "[visualize] gt=$gt_obj pred=$pred_ply"
+  python -m tongue3d.scripts.visualize_compare "$gt_obj" "$pred_ply" "$output_png" "$max_points"
+}
+
+cmd_render() {
+  if [[ $# -lt 1 ]]; then
+    echo "[error] render requires: <point_cloud.(ply|obj)> [output_png] [max_points] [size_scale]" >&2
+    usage
+    exit 1
+  fi
+
+  local point_cloud="$1"
+  local output_png="${2:-runs/renders/render_blue_splat.png}"
+  local max_points="${3:-12000}"
+  local size_scale="${4:-1.0}"
+  require_file "$point_cloud"
+
+  echo "[render] input=$point_cloud"
+  python -m tongue3d.scripts.render_blue_splat "$point_cloud" "$output_png" "$max_points" "$size_scale"
+}
+
+main() {
+  local command="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$command" in
+    train-ae)
+      cmd_train_ae "$@"
+      ;;
+    train-img)
+      cmd_train_img "$@"
+      ;;
+    eval)
+      cmd_eval "$@"
+      ;;
+    infer)
+      cmd_infer "$@"
+      ;;
+    visualize)
+      cmd_visualize "$@"
+      ;;
+    render)
+      cmd_render "$@"
+      ;;
+    -h|--help|help)
+      usage
+      ;;
+    *)
+      echo "[error] unknown command: $command" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

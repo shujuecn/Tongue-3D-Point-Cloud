@@ -38,34 +38,62 @@ TongueDB/
 - `tongue3d/scripts/train_autoencoder.py`：第一阶段点云自编码器
 - `tongue3d/scripts/train_image2shape.py`：第二阶段图像到形状
 - `tongue3d/scripts/evaluate.py`：评估（CD_L1/CD_L2/F1/Precision/Recall/NormalLoss）
-- `tongue3d/scripts/infer_single.py`：单例推理（支持 `sample_id + splits.csv`）
+- `tongue3d/scripts/infer_single.py`：单例推理（支持任意 2D 图像路径；也支持 `sample_id + splits.csv`）
 - `tongue3d/scripts/visualize_compare.py`：GT OBJ 与预测 PLY 对比图
 - `tongue3d/scripts/render_blue_splat.py`：论文风格蓝色点状（高斯泼溅感）渲染
 
-## 4. 一键流程（推荐）
+## 4. `run.sh` 子命令（训练/评估/可视化/推理解耦）
+
+查看全部命令：
 
 ```bash
-./run.sh
+./run.sh help
 ```
 
-可选环境变量：
+### 4.1 训练 AE
 
 ```bash
-AE_CONFIG=configs/autoencoder_4090_dense.yaml \
-IMG_CONFIG=configs/image2shape_4090_dense.yaml \
-SAMPLE_ID=03903.000052 \
-./run.sh
+./run.sh train-ae
+./run.sh train-ae configs/autoencoder_4090_dense.yaml
 ```
 
-`run.sh` 会自动执行：
-1. 训练 AE
-2. 自动注入 AE 最优权重到二阶段配置并训练 Image2Shape
-3. 在 val 集评估并保存 `eval_val.json`
-4. 按 `sample_id` 推理
-5. 生成 GT/Pred 对比图
-6. 生成蓝色点状渲染图
+### 4.2 训练 Image2Shape
 
-## 5. 分阶段手动训练
+默认使用配置文件里的 `autoencoder_checkpoint`：
+
+```bash
+./run.sh train-img
+./run.sh train-img configs/image2shape_4090_dense.yaml
+```
+
+也可临时覆盖 AE checkpoint：
+
+```bash
+./run.sh train-img configs/image2shape_4090_dense.yaml runs/ae_4090_dense/best.pt
+```
+
+### 4.3 评估
+
+```bash
+./run.sh eval runs/img2shape_4090_dense/best.pt
+./run.sh eval runs/img2shape_4090_dense/best.pt val runs/img2shape_4090_dense/<某次run>/splits.csv runs/img2shape_4090_dense/<某次run>/eval_val.json
+```
+
+### 4.4 单例推理（任意 2D 图像，不需要 `splits.csv`）
+
+```bash
+./run.sh infer runs/img2shape_4090_dense/best.pt TongueDB/images/03903.000052.png
+./run.sh infer runs/img2shape_4090_dense/best.pt /path/to/your_image.png runs/predictions/custom_pred.ply
+```
+
+### 4.5 可视化与论文风格蓝点渲染
+
+```bash
+./run.sh visualize TongueDB/meshes/03903.000052.obj runs/predictions/03903.000052_pred.ply runs/compare/03903_compare.png 8192
+./run.sh render runs/predictions/03903.000052_pred.ply runs/renders/03903_pred_blue_splat.png 12000 1.0
+```
+
+## 5. 分阶段直接 Python 调用（等价）
 
 ### 5.1 阶段一：AE
 
@@ -115,12 +143,13 @@ tensorboard --logdir runs
 
 CSV 同步输出到每个 run 目录下的 `metrics.csv`。
 
-## 8. 数据划分 CSV 与单例调用
+## 8. 数据划分 CSV（仅 `sample_id` 推理时需要）
 
 训练时自动保存 `splits.csv`，格式：
 - `split,sample_id,image_path,mesh_path`
 
-单例推理（按 sample_id）：
+当你传入图片路径时，不需要 `splits.csv`。  
+只有在“按 `sample_id` 推理”时才需要 `splits.csv`（用于把 sample_id 解析成图片路径）：
 
 ```bash
 python -m tongue3d.scripts.infer_single \
@@ -129,8 +158,6 @@ python -m tongue3d.scripts.infer_single \
   runs/predictions/03903.000052_pred.ply \
   runs/img2shape_4090_dense/<某次run>/splits.csv
 ```
-
-也可直接传图片路径。
 
 ## 9. 评估命令
 
