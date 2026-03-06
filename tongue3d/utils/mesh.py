@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import Iterable
 
@@ -27,7 +28,7 @@ def load_obj(path: Path) -> tuple[np.ndarray, np.ndarray]:
                     head = token.split("/")[0]
                     if not head:
                         continue
-                    indices.append(int(head) - 1)
+                    indices.append(builtins.int(head) - 1)
                 if len(indices) == 3:
                     faces.append(indices)
                 elif len(indices) > 3:
@@ -94,7 +95,7 @@ def compute_normalization_stats(mesh_paths: Iterable[Path]) -> tuple[np.ndarray,
     for path in mesh_paths:
         vertices, _ = load_obj(path)
         sum_xyz += vertices.sum(axis=0)
-        count += int(vertices.shape[0])
+        count += builtins.int(vertices.shape[0])
 
     if count == 0:
         raise ValueError("No vertices were found while computing normalization stats")
