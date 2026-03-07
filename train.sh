@@ -27,6 +27,41 @@ require_file() {
   fi
 }
 
+check_img_training_prerequisites() {
+  local img_config="$1"
+  require_file "$img_config"
+
+  python - "$img_config" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+cfg_path = Path(sys.argv[1])
+cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+wild_cfg = cfg.get("in_the_wild", {}) or {}
+
+enabled = bool(wild_cfg.get("enabled", False))
+if not enabled:
+    raise SystemExit(0)
+
+manifest_raw = wild_cfg.get("manifest_csv", "TongueDB/in_the_wild_pairs.csv")
+manifest = Path(str(manifest_raw))
+if manifest.exists():
+    raise SystemExit(0)
+
+print(
+    "[error] in_the_wild.enabled=true but manifest is missing: "
+    f"{manifest}\n"
+    "Run first:\n"
+    "  ./train.sh prepare-wild <color_dir(/mnt/<drive>/...)> <segmented_dir(/mnt/<drive>/...)> [output_csv]\n"
+    "Or disable it in config:\n"
+    "  in_the_wild.enabled: false",
+    file=sys.stderr,
+)
+raise SystemExit(2)
+PY
+}
+
 find_ae_best_checkpoint() {
   local ae_config="$1"
   python - "$ae_config" <<'PY'
@@ -79,6 +114,7 @@ cmd_train_img() {
   local img_config="${1:-$IMG_CONFIG_DEFAULT}"
   local ae_ckpt="${2:-}"
   require_file "$img_config"
+  check_img_training_prerequisites "$img_config"
 
   if [[ -n "$ae_ckpt" ]]; then
     require_file "$ae_ckpt"
@@ -94,6 +130,9 @@ cmd_train_full() {
   local ae_config="${1:-$AE_CONFIG_DEFAULT}"
   local img_config="${2:-$IMG_CONFIG_DEFAULT}"
   local ae_ckpt="${3:-}"
+
+  # 先做二阶段依赖预检，避免 AE 训练跑完后才因 manifest 缺失失败。
+  check_img_training_prerequisites "$img_config"
 
   cmd_train_ae "$ae_config"
 
@@ -139,4 +178,3 @@ main() {
 }
 
 main "$@"
-
