@@ -115,6 +115,9 @@ class Image2ShapeLossConfig(BaseModel):
 class InTheWildConfig(BaseModel):
     enabled: bool = False
     manifest_csv: Path = Path("TongueDB/in_the_wild_pairs.csv")
+    use_binary_cache: bool = False
+    binary_cache_path: Path = Path("TongueDB/in_the_wild_cache.npz")
+    augment: bool = False
     batch_size: int = Field(default=8, ge=1)
     start_epoch: int = Field(default=1, ge=1)
     max_steps_per_epoch: int = Field(default=0, ge=0)

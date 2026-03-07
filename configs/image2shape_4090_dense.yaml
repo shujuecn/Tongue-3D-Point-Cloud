@@ -79,6 +79,9 @@ loss:
 in_the_wild:
   enabled: true
   manifest_csv: TongueDB/in_the_wild_pairs.csv
+  use_binary_cache: true
+  binary_cache_path: TongueDB/in_the_wild_cache.npz
+  augment: false
   batch_size: 8
   start_epoch: 1
   max_steps_per_epoch: 0

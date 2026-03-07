@@ -47,8 +47,12 @@ class TongueImageToShape(nn.Module):
             )
         self.decoder = decoder
 
-    def forward(self, image):
+    def encode_image(self, image):
         latent_raw = self.image_encoder(image)
         latent = self.mapper(latent_raw)
+        return latent
+
+    def forward(self, image):
+        latent = self.encode_image(image)
         points, normals = self.decoder(latent)
         return latent, points, normals

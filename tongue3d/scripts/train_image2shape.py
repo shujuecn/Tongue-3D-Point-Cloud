@@ -18,6 +18,7 @@ from tongue3d.config import (
 )
 from tongue3d.data import (
     TongueImagePointDataset,
+    TongueInTheWildCacheDataset,
     TongueInTheWildPairDataset,
     load_in_the_wild_manifest,
     save_splits_csv,
@@ -200,8 +201,9 @@ def run_epoch(
             iw_color = iw_batch["color_image"].to(device, non_blocking=True).float()
             iw_segmented = iw_batch["segmented_image"].to(device, non_blocking=True).float()
             with maybe_autocast(device=device, enabled=cfg.runtime.amp):
-                iw_latent_color, _, _ = model(iw_color)
-                iw_latent_segmented, _, _ = model(iw_segmented)
+                # Consistency branch only needs latent; skip decoder for speed.
+                iw_latent_color = model.encode_image(iw_color)
+                iw_latent_segmented = model.encode_image(iw_segmented)
                 consistency_loss = torch.mean((iw_latent_color - iw_latent_segmented) ** 2)
 
             losses["total"] = losses["total"] + in_the_wild_weight * consistency_loss
@@ -320,20 +322,42 @@ def main() -> None:
 
     train_loader = make_loader(train_ds, cfg.batch_size, shuffle=True, runtime_cfg=cfg.runtime)
     val_loader = make_loader(val_ds, cfg.batch_size, shuffle=False, runtime_cfg=cfg.runtime)
+    print(
+        f"[loader] train_workers={train_loader.num_workers} val_workers={val_loader.num_workers} "
+        f"batch_size={cfg.batch_size}"
+    )
     in_the_wild_loader = None
     if cfg.in_the_wild.enabled:
-        if not cfg.in_the_wild.manifest_csv.exists():
-            raise FileNotFoundError(
-                f"in_the_wild.enabled=True but manifest does not exist: {cfg.in_the_wild.manifest_csv}. "
-                "Run: ./run.sh prepare-wild <color_dir> <segmented_dir> [output_csv]"
+        in_the_wild_ds = None
+        if cfg.in_the_wild.use_binary_cache and cfg.in_the_wild.binary_cache_path.exists():
+            in_the_wild_ds = TongueInTheWildCacheDataset(
+                cache_path=cfg.in_the_wild.binary_cache_path,
+                image_size=cfg.dataset.image_size,
+                augment=cfg.in_the_wild.augment,
             )
-        in_the_wild_samples = load_in_the_wild_manifest(cfg.in_the_wild.manifest_csv)
-        in_the_wild_ds = TongueInTheWildPairDataset(
-            samples=in_the_wild_samples,
-            image_size=cfg.dataset.image_size,
-            augment=cfg.dataset.augment,
-            use_segmented_mask_preprocess=cfg.in_the_wild.use_segmented_mask_preprocess,
-        )
+            print(
+                f"[in_the_wild] use binary cache: {cfg.in_the_wild.binary_cache_path} "
+                f"(samples={len(in_the_wild_ds)}, augment={cfg.in_the_wild.augment})"
+            )
+        else:
+            if cfg.in_the_wild.use_binary_cache and not cfg.in_the_wild.binary_cache_path.exists():
+                print(
+                    f"[warn] in_the_wild.use_binary_cache=True but cache file not found: "
+                    f"{cfg.in_the_wild.binary_cache_path}. Fallback to CSV manifest."
+                )
+            if not cfg.in_the_wild.manifest_csv.exists():
+                raise FileNotFoundError(
+                    f"in_the_wild.enabled=True but manifest does not exist: {cfg.in_the_wild.manifest_csv}. "
+                    "Run: ./train.sh prepare-wild <color_dir> <segmented_dir> [output_csv]"
+                )
+            in_the_wild_samples = load_in_the_wild_manifest(cfg.in_the_wild.manifest_csv)
+            in_the_wild_ds = TongueInTheWildPairDataset(
+                samples=in_the_wild_samples,
+                image_size=cfg.dataset.image_size,
+                augment=cfg.in_the_wild.augment,
+                use_segmented_mask_preprocess=cfg.in_the_wild.use_segmented_mask_preprocess,
+            )
+
         in_the_wild_loader = make_loader(
             in_the_wild_ds,
             batch_size=cfg.in_the_wild.batch_size,
@@ -341,8 +365,8 @@ def main() -> None:
             runtime_cfg=cfg.runtime,
         )
         print(
-            f"[in_the_wild] loaded {len(in_the_wild_ds)} samples from {cfg.in_the_wild.manifest_csv} "
-            f"(batch_size={cfg.in_the_wild.batch_size})"
+            f"[in_the_wild] loaded {len(in_the_wild_ds)} samples "
+            f"(batch_size={cfg.in_the_wild.batch_size}, workers={in_the_wild_loader.num_workers})"
         )
 
     model_kwargs = ae_ckpt.get("model_kwargs", {})

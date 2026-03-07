@@ -25,6 +25,17 @@ def _is_wsl() -> bool:
 
 
 def _resolve_num_workers(requested: int) -> int:
+    env_workers = os.environ.get("TONGUE3D_NUM_WORKERS")
+    if env_workers is not None and env_workers.strip() != "":
+        try:
+            requested = max(0, int(env_workers))
+            print(f"[warn] Override num_workers via TONGUE3D_NUM_WORKERS={requested}")
+        except Exception:
+            print(
+                f"[warn] Invalid TONGUE3D_NUM_WORKERS='{env_workers}', "
+                f"fallback to config value num_workers={requested}"
+            )
+
     if requested <= 0:
         return 0
 
@@ -33,7 +44,14 @@ def _resolve_num_workers(requested: int) -> int:
         return 0
 
     # WSL 上多进程 DataLoader 在部分 torch/cuda 组合下可能触发段错误，默认回退到单进程。
+    # 若你确认环境稳定，可设置 TONGUE3D_ALLOW_WSL_WORKERS=1 显式开启多进程。
     if _is_wsl():
+        if os.environ.get("TONGUE3D_ALLOW_WSL_WORKERS", "0") == "1":
+            print(
+                "[warn] Detected WSL but TONGUE3D_ALLOW_WSL_WORKERS=1, "
+                f"using requested num_workers={requested}"
+            )
+            return requested
         print("[warn] Detected WSL, fallback num_workers=0 for DataLoader stability")
         return 0
     return requested

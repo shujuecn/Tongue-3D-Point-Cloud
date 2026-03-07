@@ -1,6 +1,7 @@
 from .dataset import (
     InTheWildPairSample,
     TongueImagePointDataset,
+    TongueInTheWildCacheDataset,
     TongueInTheWildPairDataset,
     TonguePointCloudDataset,
     load_in_the_wild_manifest,
@@ -18,4 +19,5 @@ __all__ = [
     "InTheWildPairSample",
     "load_in_the_wild_manifest",
     "TongueInTheWildPairDataset",
+    "TongueInTheWildCacheDataset",
 ]

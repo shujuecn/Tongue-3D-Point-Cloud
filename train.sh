@@ -9,6 +9,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   ./train.sh prepare-wild <color_dir> <segmented_dir> [output_csv]
+  ./train.sh cache-wild [manifest_csv] [output_npz] [image_size] [use_segmented_mask_preprocess]
   ./train.sh ae [ae_config]
   ./train.sh img [img_config] [ae_checkpoint]
   ./train.sh full [ae_config] [img_config] [ae_checkpoint]
@@ -16,6 +17,7 @@ Usage:
 Notes:
   - This script is training-only (no eval/infer/visualize).
   - prepare-wild requires WSL mount paths like /mnt/f/... (Windows-style paths are rejected).
+  - cache-wild packs 5000+ in-the-wild pairs into a binary cache for faster loading.
 USAGE
 }
 
@@ -46,14 +48,24 @@ if not enabled:
 
 manifest_raw = wild_cfg.get("manifest_csv", "TongueDB/in_the_wild_pairs.csv")
 manifest = Path(str(manifest_raw))
+use_binary_cache = bool(wild_cfg.get("use_binary_cache", False))
+cache_raw = wild_cfg.get("binary_cache_path", "TongueDB/in_the_wild_cache.npz")
+cache = Path(str(cache_raw))
+
+if use_binary_cache and cache.exists():
+    raise SystemExit(0)
+
 if manifest.exists():
     raise SystemExit(0)
 
 print(
-    "[error] in_the_wild.enabled=true but manifest is missing: "
-    f"{manifest}\n"
+    "[error] in_the_wild.enabled=true but required data index is missing.\n"
+    f"manifest: {manifest} (exists={manifest.exists()})\n"
+    f"binary cache: {cache} (enabled={use_binary_cache}, exists={cache.exists()})\n"
     "Run first:\n"
     "  ./train.sh prepare-wild <color_dir(/mnt/<drive>/...)> <segmented_dir(/mnt/<drive>/...)> [output_csv]\n"
+    "Optional acceleration:\n"
+    "  ./train.sh cache-wild [manifest_csv] [output_npz] [image_size] [use_segmented_mask_preprocess]\n"
     "Or disable it in config:\n"
     "  in_the_wild.enabled: false",
     file=sys.stderr,
@@ -101,6 +113,18 @@ cmd_prepare_wild() {
 
   echo "[prepare-wild] color=$color_dir segmented=$segmented_dir output=$output_csv"
   python -m tongue3d.scripts.prepare_in_the_wild_pairs "$color_dir" "$segmented_dir" "$output_csv"
+}
+
+cmd_cache_wild() {
+  local manifest_csv="${1:-$WILD_MANIFEST_DEFAULT}"
+  local output_npz="${2:-TongueDB/in_the_wild_cache.npz}"
+  local image_size="${3:-224}"
+  local use_segmented_mask_preprocess="${4:-1}"
+  require_file "$manifest_csv"
+
+  echo "[cache-wild] manifest=$manifest_csv output=$output_npz image_size=$image_size mask=$use_segmented_mask_preprocess"
+  python -m tongue3d.scripts.build_in_the_wild_cache \
+    "$manifest_csv" "$output_npz" "$image_size" "$use_segmented_mask_preprocess"
 }
 
 cmd_train_ae() {
@@ -156,6 +180,9 @@ main() {
   case "$command" in
     prepare-wild)
       cmd_prepare_wild "$@"
+      ;;
+    cache-wild)
+      cmd_cache_wild "$@"
       ;;
     ae)
       cmd_train_ae "$@"

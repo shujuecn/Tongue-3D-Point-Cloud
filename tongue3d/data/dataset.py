@@ -312,6 +312,65 @@ class TongueInTheWildPairDataset(Dataset):
         }
 
 
+class TongueInTheWildCacheDataset(Dataset):
+    def __init__(
+        self,
+        cache_path: Path,
+        image_size: int,
+        augment: bool = False,
+    ) -> None:
+        self.cache_path = cache_path
+        pack = np.load(cache_path, allow_pickle=False)
+        self.sample_ids = pack["sample_ids"]
+        self.color = pack["color"]
+        self.segmented = pack["segmented"]
+        self.cache_image_size = int(pack["image_size"][0]) if "image_size" in pack else int(image_size)
+
+        if self.color.ndim != 4 or self.color.shape[-1] != 3:
+            raise ValueError(f"Invalid color tensor shape in cache: {self.color.shape}")
+        if self.segmented.shape != self.color.shape:
+            raise ValueError(
+                f"Cache color/segmented shape mismatch: {self.color.shape} vs {self.segmented.shape}"
+            )
+        if self.color.shape[1] != image_size or self.color.shape[2] != image_size:
+            raise ValueError(
+                f"Cache image_size mismatch: cache={self.color.shape[1]} requested={image_size}. "
+                "Please rebuild cache with the target image_size."
+            )
+
+        self.transform = build_image_transform(image_size=image_size, augment=augment)
+        self._mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+        self._std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+        self.augment = bool(augment)
+
+    def __len__(self) -> int:
+        return int(self.color.shape[0])
+
+    def _to_tensor_fast(self, image_hwc_uint8: np.ndarray) -> torch.Tensor:
+        # Fast path for cache mode when augmentation is disabled.
+        x = torch.from_numpy(image_hwc_uint8).permute(2, 0, 1).contiguous().float().div_(255.0)
+        x = (x - self._mean) / self._std
+        return x
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        sample_id = str(self.sample_ids[idx])
+        color_np = self.color[idx]
+        segmented_np = self.segmented[idx]
+
+        if self.augment:
+            color_tensor = self.transform(Image.fromarray(color_np, mode="RGB"))
+            segmented_tensor = self.transform(Image.fromarray(segmented_np, mode="RGB"))
+        else:
+            color_tensor = self._to_tensor_fast(color_np)
+            segmented_tensor = self._to_tensor_fast(segmented_np)
+
+        return {
+            "sample_id": sample_id,
+            "color_image": color_tensor,
+            "segmented_image": segmented_tensor,
+        }
+
+
 def stable_seed_from_string(value: str) -> int:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**32)
