@@ -1,72 +1,77 @@
 # Tongue 2D->3D 重建复现（PyTorch）
 
-本仓库是对参考 CVPR 工作的工程化复现，目标是从单张舌象图像重建 3D 舌体点云。
+本项目用于从单张舌象图像重建 3D 舌体点云，核心是两阶段训练：
 
-## 1. 当前复现程度（重点）
+1. 阶段一：`Point AutoEncoder (AE)` 学习 3D 舌体潜空间与解码器。
+2. 阶段二：`Image2Shape` 学习 `2D图像 -> latent -> 3D点云`。
 
-按可运行功能和论文主干对齐程度评估，当前复现大约在 **75%~85%**：
+在当前版本中，已接入你提供的两类增强数据：
 
-- 已完成
-  - 两阶段主干：`Point AE -> Image2Shape`
-  - 2D-3D 监督训练与验证
-  - 单张图像推理、评估、可视化
-  - mask 感知训练（`TongueDB/masks`）
-  - 5000+ 真实世界图像的一致性训练（无 3D 真值）
-  - 实验记录（`metrics.csv`/`tensorboard`/`splits.csv`）
+- `TongueDB/masks`（1828 对监督样本的舌体分割）
+- 5000+ 真实世界彩色图/分割图（无 3D 真值）
 
-- 未完全复现（实事求是）
-  - 论文 TongueGAN 的完整生成器-判别器链路
-  - 论文中涉及的头部/身份参数化重建链路（如 UHM 相关流程）
-  - 你未提供的监督信息（例如关键点、3DMM 参数）
+---
 
-结论：本项目目前是“可训练、可推理、可扩展”的强工程复现版本，但不是论文全链路 1:1 复刻。
+## 1. 复现程度（当前状态）
 
-## 2. 项目结构
+按“论文主干+可运行工程”衡量，当前复现大约 **80% 左右**。
+
+已完成：
+- 两阶段主干训练与推理
+- mask 感知训练（舌体 ROI）
+- 真实世界一致性训练（无 3D）
+- 训练日志、评估、可视化、单图推理
+- 5000+ 数据二进制缓存加速（`in_the_wild_cache.npz`）
+
+未完全复现：
+- 论文 TongueGAN 的完整生成器-判别器链路
+- 论文中与头部参数化/身份相关的完整后续链路
+- 你未提供监督信息对应的模块（例如关键点或参数化身份标注）
+
+结论：当前是可稳定训练和迭代优化的工程复现版本，不是论文全链路 1:1 复刻。
+
+---
+
+## 2. 目录与数据约定
 
 ```text
 TongueDB/
-  images/*.png            # 2D 原图
-  meshes/*.obj            # 3D 网格（监督训练）
-  masks/*.png             # 0/255 舌体 mask（与 images 同名）
-  in_the_wild_pairs.csv   # 5000+ 真实世界配对清单（由脚本生成）
+  images/*.png                  # 监督样本 2D 图
+  meshes/*.obj                  # 监督样本 3D 网格
+  masks/*.png                   # 监督样本 mask，0/255，与 images 同名
+  in_the_wild_pairs.csv         # 5000+ 真实世界配对清单（脚本生成）
+  in_the_wild_cache.npz         # 5000+ 二进制缓存（脚本生成）
 
 configs/
   autoencoder_4090_dense.yaml
   image2shape_4090_dense.yaml
 
-run.sh                    # 全功能入口（train/eval/infer/visualize/render/prepare-wild）
-train.sh                  # 仅训练入口（你要求新增）
-
-tongue3d/
-  scripts/train_autoencoder.py
-  scripts/train_image2shape.py
-  scripts/prepare_in_the_wild_pairs.py
+train.sh                        # 训练专用入口（推荐）
+run.sh                          # 全功能入口（eval/infer/visualize 等）
 ```
 
-## 3. 环境准备
+监督样本按文件名 stem 对齐，例如：
+- `TongueDB/images/03903.000052.png`
+- `TongueDB/meshes/03903.000052.obj`
+- `TongueDB/masks/03903.000052.png`
+
+---
+
+## 3. 环境
 
 ```bash
 pip install -r requirements.txt
 ```
 
-建议：WSL 下 `num_workers: 0`（已在默认配置中设置），可避免 DataLoader 相关崩溃。
+建议在 WSL 中运行，并优先使用 `train.sh`。
 
-## 4. 数据准备
+---
 
-### 4.1 监督数据（1828 对）
+## 4. 推荐运行流程（当前最佳实践）
 
-要求同名配对：
-- `TongueDB/images/<sample_id>.png`
-- `TongueDB/meshes/<sample_id>.obj`
-- `TongueDB/masks/<sample_id>.png`
+### 4.1 生成 5000+ 配对清单（只需一次）
 
-其中 `masks` 为 0/255 二值图（255=舌体）。
-
-### 4.2 真实世界 5000+ 数据
-
-你提供的数据用于域泛化一致性训练，输入必须是 **WSL 路径**（`/mnt/f/...`）。
-
-先生成 manifest：
+输入路径必须是 WSL 路径风格：`/mnt/<盘符>/...`
 
 ```bash
 ./train.sh prepare-wild \
@@ -75,75 +80,193 @@ pip install -r requirements.txt
   TongueDB/in_the_wild_pairs.csv
 ```
 
-注意：不再支持传 Windows 盘符路径（如 `F:\...`）。
-
-## 5. 训练流程（推荐）
-
-### 5.1 一键训练主流程（仅训练）
+### 4.2 生成二进制缓存（只需一次，强烈推荐）
 
 ```bash
-./train.sh full configs/autoencoder_4090_dense.yaml configs/image2shape_4090_dense.yaml
+./train.sh cache-wild TongueDB/in_the_wild_pairs.csv TongueDB/in_the_wild_cache.npz 224 1
 ```
 
-该命令会：
-1. 训练阶段一 AE。
-2. 自动定位 AE 的 `best.pt`。
-3. 训练阶段二 Image2Shape。
+参数说明：
+- `224`：缓存图像尺寸（需与配置一致）
+- `1`：对彩色图应用 segmented mask 背景抑制
 
-### 5.2 分阶段训练
+### 4.3 训练阶段一 AE
 
 ```bash
-# 阶段一：AE
 ./train.sh ae configs/autoencoder_4090_dense.yaml
+```
 
-# 阶段二：Image2Shape（显式传入 AE 权重）
+### 4.4 训练阶段二 Image2Shape（推荐命令）
+
+```bash
+TONGUE3D_ALLOW_WSL_WORKERS=1 TONGUE3D_NUM_WORKERS=4 \
 ./train.sh img configs/image2shape_4090_dense.yaml runs/ae_4090_dense/best.pt
 ```
 
-## 6. 训练方法说明（当前实现）
+说明：
+- `TONGUE3D_ALLOW_WSL_WORKERS=1`：允许 WSL 多进程 DataLoader
+- `TONGUE3D_NUM_WORKERS=4`：覆盖配置里的 worker 数
 
-### 阶段一：Point AE
+如果不稳定，先降到 `2`，再不稳定回退到 `0`。
 
-- 输入：3D 网格采样点云
-- 输出：重建点云
-- 作用：学习稳定的 3D 舌体形状潜空间和解码器
+---
 
-### 阶段二：Image2Shape
+## 5. 两阶段模型架构（详细）
 
-- 输入：2D 舌象图
-- 输出：3D 点云
-- 监督损失：`chamfer + normal + laplacian + edge + repulsion + latent`
+### 5.1 阶段一：Point AutoEncoder
 
-### 本仓库新增的两个增强（基于你提供数据）
+代码：`tongue3d/models/point_autoencoder.py`
 
-- `mask` 感知训练（对 1828 对监督样本）
-  - 背景抑制（非舌体置黑）
-  - 舌体 ROI 裁剪（带 margin）
-  - 目的：降低嘴唇区域干扰
+编码器 `PointNetEncoder`：
+- 输入：`B x N x 3`
+- `Conv1d(3->64, k=1) + BN + ReLU`
+- `Conv1d(64->128, k=1) + BN + ReLU`
+- `Conv1d(128->256, k=1) + BN + ReLU`
+- `Conv1d(256->512, k=1) + BN + ReLU`
+- 全局最大池化（点维度）
+- `Linear(512->512) + ReLU + Dropout`
+- `Linear(512->latent_dim)`
 
-- `in_the_wild` 一致性训练（对 5000+ 无3D样本）
-  - 约束“彩色图”和“分割图”预测的 latent 一致
-  - 不需要 3D 真值
-  - 目的：增强真实世界泛化
+解码器 `PointDecoder`：
+- 输入：`B x latent_dim`
+- `Linear(latent_dim->hidden_dim) + ReLU + Dropout`
+- `Linear(hidden_dim->hidden_dim) + ReLU + Dropout`
+- `Linear(hidden_dim->num_points*6)`
+- reshape 为 `B x num_points x 6`
+- 前 3 维 `tanh` 作为坐标，后 3 维 `L2 normalize` 作为法向
 
-## 7. 配置重点（`configs/image2shape_4090_dense.yaml`）
+阶段一作用：
+- 学到稳定的舌体 3D 潜空间
+- 产出可复用 decoder（给阶段二）
 
-关键配置项：
+### 5.2 阶段二：Image2Shape
+
+代码：`tongue3d/models/image_encoder.py` + `image_to_shape.py`
+
+图像编码器 `TongueImageEncoder`：
+- 主干：`ResNet50`（默认 ImageNet 预训练）
+- 去掉原分类头，接 MLP 头：
+  - `Linear(in_features->1024) + ReLU + Dropout`
+  - `Linear(1024->latent_dim)`
+
+latent 映射器 `LatentMapper`：
+- `Linear(latent_dim->latent_dim) + ReLU + Dropout + Linear(latent_dim->latent_dim)`
+
+解码器：
+- 直接复用阶段一 AE 的 `PointDecoder`
+
+正向流程：
+1. `image -> image_encoder -> latent_raw`
+2. `latent_raw -> mapper -> latent`
+3. `latent -> decoder -> points + normals`
+
+### 5.3 真实世界一致性分支（5000+ 无3D）
+
+代码：`tongue3d/scripts/train_image2shape.py`
+
+对每个 in-the-wild 样本，取两种输入：
+- 彩色图（可含背景抑制）
+- 分割图（黑底舌体）
+
+一致性损失：
+- 仅计算 latent，不走 decoder（已优化提速）
+- `L_consistency = MSE(latent(color), latent(segmented))`
+
+总损失中叠加：
+- `L_total = L_supervised + w_consistency * L_consistency`
+
+---
+
+## 6. 关键训练参数（当前配置）
+
+### 6.1 AE：`configs/autoencoder_4090_dense.yaml`
+
+- `epochs: 220`
+- `batch_size: 8`
+- `grad_accum_steps: 2`
+- `dataset.num_points: 8192`
+- `model.latent_dim: 256`
+- `model.decoder_hidden_dim: 1536`
+- `optimizer.lr: 1.5e-4`
+- `loss`：
+  - `chamfer: 1.0`
+  - `normal: 0.1`
+  - `laplacian: 0.07`
+  - `edge: 0.03`
+  - `repulsion: 0.02`
+
+### 6.2 Image2Shape：`configs/image2shape_4090_dense.yaml`
+
+基础参数：
+- `epochs: 170`
+- `batch_size: 8`
+- `grad_accum_steps: 2`
+- `dataset.num_points: 8192`
+- `model.latent_dim: 256`
+- `freeze_decoder: false`
+- `decoder_lr_scale: 0.2`
+- `optimizer.lr: 8e-5`
+
+监督损失：
+- `chamfer: 1.2`
+- `normal: 0.08`
+- `laplacian: 0.08`
+- `edge: 0.03`
+- `repulsion: 0.02`
+- `latent: 1.2`
+
+mask 感知参数：
 - `dataset.use_mask: true`
 - `dataset.mask_crop: true`
 - `dataset.mask_background_zero: true`
+- `dataset.mask_threshold: 127`
+- `dataset.mask_margin_ratio: 0.08`
+
+in-the-wild 参数：
 - `in_the_wild.enabled: true`
-- `in_the_wild.manifest_csv: TongueDB/in_the_wild_pairs.csv`
+- `in_the_wild.use_binary_cache: true`
+- `in_the_wild.binary_cache_path: TongueDB/in_the_wild_cache.npz`
+- `in_the_wild.batch_size: 8`
+- `in_the_wild.augment: false`
 - `loss.in_the_wild_consistency: 0.2`
 
-你可以据此调优“嘴唇聚点”问题：
-- 提高 `loss.in_the_wild_consistency`
-- 增大 `dataset.mask_margin_ratio`
-- 适度提升 `loss.repulsion` 与 `loss.laplacian`
+---
 
-## 8. 训练后评估与推理
+## 7. 低 GPU 利用率排查与调优
 
-虽然 `train.sh` 只负责训练，完整功能仍在 `run.sh`：
+你当前日志里的优化路径是正确的。
+
+建议顺序：
+1. 先生成 `in_the_wild_cache.npz`，避免每 step 大量随机读图。
+2. 开启 WSL 多 worker：
+   - `TONGUE3D_ALLOW_WSL_WORKERS=1`
+   - `TONGUE3D_NUM_WORKERS=4`
+3. 观察启动日志：
+   - `[loader] train_workers=4 ...`
+   - `[in_the_wild] ... workers=4`
+
+如果遇到不稳定：
+- 先把 `TONGUE3D_NUM_WORKERS` 降到 `2`
+- 仍不稳就回退 `0`
+
+---
+
+## 8. 训练输出与检查点
+
+输出目录：`runs/<experiment_name>/<timestamp_run>/`
+
+典型文件：
+- `config.json`
+- `normalization.json`
+- `splits.csv`
+- `metrics.csv`
+- `tensorboard/`
+- `best.pt`
+- `last.pt`
+
+---
+
+## 9. 评估与推理（非训练）
 
 ```bash
 # 评估
@@ -157,18 +280,13 @@ pip install -r requirements.txt
 ./run.sh render runs/predictions/03903.000052_pred.ply
 ```
 
-## 9. 输出目录
+---
 
-每次训练会在 `runs/<experiment>/` 下创建时间戳目录，包含：
-- `config.json`
-- `normalization.json`
-- `splits.csv`
-- `metrics.csv`
-- `tensorboard/`
-- `best.pt` / `last.pt`
+## 10. 能力边界与下一步
 
-## 10. 当前能力边界
+当前版本已能稳定训练并利用你新增数据显著增强泛化，但仍属于工程复现路线。
 
-- 本仓库可稳定完成 2D->3D 训练与推理，但视觉结果仍受数据域差异影响。
-- CloudCompare 后处理可用于工程展示，但应与模型原始输出分开汇报。
-- 若后续需要完整论文链路，可继续扩展 TongueGAN 分支。 
+如果后续目标是进一步逼近论文完整链路，下一步建议优先做：
+1. TongueGAN 完整生成器-判别器训练分支。
+2. “嘴唇聚点率”等专门诊断指标接入验证流程。
+3. 结构化 ablation（mask 开关、consistency 权重、cache/worker 对速度和质量影响）。
