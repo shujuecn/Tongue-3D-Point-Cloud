@@ -1,5 +1,5 @@
-experiment_name: img2shape_4090_dense
-output_dir: runs/img2shape_4090_dense
+experiment_name: img2shape_4090_mask_guided
+output_dir: runs/img2shape_4090_mask_guided
 seed: 42
 epochs: 170
 batch_size: 8
@@ -20,9 +20,9 @@ dataset:
   preload_meshes: true
   augment: true
   use_mask: false
-  mask_as_channel: false
+  mask_as_channel: true
   mask_crop: false
-  mask_background_zero: true
+  mask_background_zero: false
   mask_threshold: 127
   mask_margin_ratio: 0.08
 

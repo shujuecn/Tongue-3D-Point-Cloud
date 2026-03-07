@@ -339,14 +339,25 @@ def main() -> None:
 
     train_loader = make_loader(train_ds, cfg.batch_size, shuffle=True, runtime_cfg=cfg.runtime)
     val_loader = make_loader(val_ds, cfg.batch_size, shuffle=False, runtime_cfg=cfg.runtime)
+    input_channels = 4 if cfg.dataset.mask_as_channel else 3
     print(
         f"[loader] train_workers={train_loader.num_workers} val_workers={val_loader.num_workers} "
         f"batch_size={cfg.batch_size}"
+    )
+    print(
+        f"[input] input_channels={input_channels} "
+        f"mask_as_channel={cfg.dataset.mask_as_channel} "
+        f"use_mask_preprocess={cfg.dataset.use_mask}"
     )
     if cfg.in_the_wild.enabled and not cfg.freeze_decoder:
         print(
             "[warn] in_the_wild is enabled while freeze_decoder=false. "
             "This is less aligned with paper-style stage2 training and may hurt geometry stability."
+        )
+    if cfg.dataset.mask_as_channel and cfg.dataset.use_mask:
+        print(
+            "[warn] dataset.mask_as_channel=True and dataset.use_mask=True. "
+            "This will feed both masked RGB and a mask channel, which is usually a stronger prior than needed."
         )
 
     in_the_wild_loader = None
@@ -424,6 +435,7 @@ def main() -> None:
         decoder_hidden_dim=cfg.model.decoder_hidden_dim,
         dropout=cfg.model.dropout,
         pretrained_backbone=True,
+        input_channels=input_channels,
         decoder=ae_model.decoder,
     ).to(device)
 
@@ -549,6 +561,7 @@ def main() -> None:
                 "num_points": cfg.dataset.num_points,
                 "decoder_hidden_dim": cfg.model.decoder_hidden_dim,
                 "dropout": cfg.model.dropout,
+                "input_channels": input_channels,
             },
             "metrics": {
                 "train": train_metrics,

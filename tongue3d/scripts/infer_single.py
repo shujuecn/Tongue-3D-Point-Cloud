@@ -83,7 +83,7 @@ def resolve_image_path(query: str, split_csv: Path | None) -> tuple[Path, str]:
 
 
 def infer_mask_path(sample_id: str, dataset_cfg: DatasetConfig) -> Path | None:
-    if not dataset_cfg.use_mask:
+    if not (dataset_cfg.use_mask or dataset_cfg.mask_as_channel):
         return None
     candidate = dataset_cfg.mask_dir / f"{sample_id}.png"
     if candidate.exists():
@@ -113,6 +113,7 @@ def main() -> None:
     num_points = int(model_kwargs.get("num_points", cfg.get("dataset", {}).get("num_points", 2048)))
     hidden_dim = int(model_kwargs.get("decoder_hidden_dim", cfg.get("model", {}).get("decoder_hidden_dim", 1024)))
     dropout = float(model_kwargs.get("dropout", cfg.get("model", {}).get("dropout", 0.1)))
+    input_channels = int(model_kwargs.get("input_channels", 3))
 
     model = TongueImageToShape(
         latent_dim=latent_dim,
@@ -120,6 +121,7 @@ def main() -> None:
         decoder_hidden_dim=hidden_dim,
         dropout=dropout,
         pretrained_backbone=False,
+        input_channels=input_channels,
     )
     model.load_state_dict(checkpoint["model_state"], strict=True)
 
@@ -131,13 +133,25 @@ def main() -> None:
     mask_path = infer_mask_path(sample_id=sample_id, dataset_cfg=dataset_cfg)
     with Image.open(image_path) as image:
         image = image.convert("RGB")
-        if mask_path is not None:
+        if dataset_cfg.use_mask and mask_path is not None:
             image = apply_mask_preprocess_with_mask_path(
                 image=image,
                 mask_path=mask_path,
                 dataset_cfg=dataset_cfg,
             )
         image_tensor = transform(image).unsqueeze(0).to(device)
+
+    if dataset_cfg.mask_as_channel:
+        if mask_path is None:
+            raise FileNotFoundError(
+                "This checkpoint expects dataset.mask_as_channel=True, but no same-name mask was found. "
+                f"Expected: {dataset_cfg.mask_dir / f'{sample_id}.png'}"
+            )
+        with Image.open(mask_path) as mask:
+            mask = mask.convert("L").resize((image_size, image_size), resample=Image.NEAREST)
+            mask_np = (np.asarray(mask, dtype=np.uint8) >= int(dataset_cfg.mask_threshold)).astype(np.float32)
+            mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0).to(device)
+        image_tensor = torch.cat([image_tensor, mask_tensor], dim=1)
 
     with torch.no_grad():
         _, pred_points, pred_normals = model(image_tensor)

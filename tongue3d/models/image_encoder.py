@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 
+import torch
 from torch import nn
 
 try:
@@ -19,9 +20,13 @@ class TongueImageEncoder(nn.Module):
         latent_dim: int = 256,
         dropout: float = 0.2,
         pretrained_backbone: bool = True,
+        input_channels: int = 3,
     ) -> None:
         super().__init__()
-        backbone, in_features = self._build_backbone(pretrained_backbone=pretrained_backbone)
+        backbone, in_features = self._build_backbone(
+            pretrained_backbone=pretrained_backbone,
+            input_channels=input_channels,
+        )
 
         self.backbone = backbone
         self.head = nn.Sequential(
@@ -32,16 +37,17 @@ class TongueImageEncoder(nn.Module):
         )
 
     @staticmethod
-    def _build_backbone(pretrained_backbone: bool) -> tuple[nn.Module, int]:
+    def _build_backbone(pretrained_backbone: bool, input_channels: int) -> tuple[nn.Module, int]:
         if not _HAS_TORCHVISION:
             warnings.warn(
                 "torchvision is not available. Falling back to a small CNN backbone. "
                 "Install torchvision for ResNet-50."
             )
-            return _fallback_backbone()
+            return _fallback_backbone(input_channels=input_channels)
 
         if not pretrained_backbone:
             backbone = resnet50(weights=None)
+            _adapt_first_conv(backbone, input_channels=input_channels)
             in_features = backbone.fc.in_features
             backbone.fc = nn.Identity()
             return backbone, in_features
@@ -54,6 +60,7 @@ class TongueImageEncoder(nn.Module):
             )
             backbone = resnet50(weights=None)
 
+        _adapt_first_conv(backbone, input_channels=input_channels)
         in_features = backbone.fc.in_features
         backbone.fc = nn.Identity()
         return backbone, in_features
@@ -64,9 +71,38 @@ class TongueImageEncoder(nn.Module):
         return latent
 
 
-def _fallback_backbone() -> tuple[nn.Module, int]:
+def _adapt_first_conv(backbone: nn.Module, input_channels: int) -> None:
+    if input_channels == 3:
+        return
+
+    old_conv = backbone.conv1
+    new_conv = nn.Conv2d(
+        input_channels,
+        old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        padding=old_conv.padding,
+        bias=old_conv.bias is not None,
+    )
+
+    with torch.no_grad():
+        if input_channels > old_conv.in_channels:
+            new_conv.weight[:, : old_conv.in_channels] = old_conv.weight
+            extra = input_channels - old_conv.in_channels
+            mean_weight = old_conv.weight.mean(dim=1, keepdim=True)
+            new_conv.weight[:, old_conv.in_channels :] = mean_weight.repeat(1, extra, 1, 1)
+        else:
+            new_conv.weight.copy_(old_conv.weight[:, :input_channels])
+
+        if old_conv.bias is not None and new_conv.bias is not None:
+            new_conv.bias.copy_(old_conv.bias)
+
+    backbone.conv1 = new_conv
+
+
+def _fallback_backbone(input_channels: int) -> tuple[nn.Module, int]:
     backbone = nn.Sequential(
-        nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
+        nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
         nn.BatchNorm2d(64),
         nn.ReLU(inplace=True),
         nn.MaxPool2d(kernel_size=3, stride=2, padding=1),

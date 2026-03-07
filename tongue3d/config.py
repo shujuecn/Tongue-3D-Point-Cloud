@@ -18,6 +18,7 @@ class DatasetConfig(BaseModel):
     preload_meshes: bool = True
     augment: bool = True
     use_mask: bool = False
+    mask_as_channel: bool = False
     mask_crop: bool = True
     mask_background_zero: bool = True
     mask_threshold: int = Field(default=127, ge=0, le=255)

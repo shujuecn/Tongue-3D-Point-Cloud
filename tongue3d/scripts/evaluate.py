@@ -110,6 +110,7 @@ def main() -> None:
         decoder_hidden_dim=int(model_kwargs["decoder_hidden_dim"]),
         dropout=float(model_kwargs["dropout"]),
         pretrained_backbone=False,
+        input_channels=int(model_kwargs.get("input_channels", 3)),
     )
     model.load_state_dict(checkpoint["model_state"], strict=True)
 

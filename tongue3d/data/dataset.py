@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,14 +15,22 @@ import warnings
 
 try:
     from torchvision import transforms
+    from torchvision.transforms import InterpolationMode
+    from torchvision.transforms import functional as TF
     _HAS_TORCHVISION = True
 except Exception:
     transforms = None
+    InterpolationMode = None
+    TF = None
     _HAS_TORCHVISION = False
 
 from tongue3d.config import DatasetConfig
 from tongue3d.data.splits import TongueSample
 from tongue3d.utils.mesh import load_obj, normalize_points, sample_points_from_mesh
+
+
+_IMAGE_MEAN = [0.485, 0.456, 0.406]
+_IMAGE_STD = [0.229, 0.224, 0.225]
 
 
 class _MeshCache:
@@ -54,15 +63,15 @@ def build_image_transform(image_size: int, augment: bool) -> transforms.Compose:
     ops.extend(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize(mean=_IMAGE_MEAN, std=_IMAGE_STD),
         ]
     )
     return transforms.Compose(ops)
 
 
 def _fallback_transform(image_size: int):
-    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+    mean = torch.tensor(_IMAGE_MEAN, dtype=torch.float32).view(3, 1, 1)
+    std = torch.tensor(_IMAGE_STD, dtype=torch.float32).view(3, 1, 1)
 
     def _apply(image: Image.Image) -> torch.Tensor:
         image = image.resize((image_size, image_size), resample=Image.BILINEAR)
@@ -72,6 +81,60 @@ def _fallback_transform(image_size: int):
         return tensor
 
     return _apply
+
+
+def build_image_and_mask_tensors(
+    image: Image.Image,
+    mask: Image.Image,
+    image_size: int,
+    augment: bool,
+    mask_threshold: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    mask = mask.convert("L")
+
+    if _HAS_TORCHVISION:
+        image = TF.resize(
+            image,
+            [image_size, image_size],
+            interpolation=InterpolationMode.BILINEAR,
+        )
+        mask = TF.resize(
+            mask,
+            [image_size, image_size],
+            interpolation=InterpolationMode.NEAREST,
+        )
+        if augment:
+            image = transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.15,
+                hue=0.02,
+            )(image)
+            if random.random() < 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+
+        image_tensor = TF.normalize(TF.to_tensor(image), mean=_IMAGE_MEAN, std=_IMAGE_STD)
+        mask_tensor = TF.to_tensor(mask)
+    else:
+        image = image.resize((image_size, image_size), resample=Image.BILINEAR)
+        mask = mask.resize((image_size, image_size), resample=Image.NEAREST)
+        if augment and random.random() < 0.5:
+            image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+
+        image_np = np.asarray(image, dtype=np.float32) / 255.0
+        image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).contiguous()
+        mean = torch.tensor(_IMAGE_MEAN, dtype=torch.float32).view(3, 1, 1)
+        std = torch.tensor(_IMAGE_STD, dtype=torch.float32).view(3, 1, 1)
+        image_tensor = (image_tensor - mean) / std
+
+        mask_np = np.asarray(mask, dtype=np.float32) / 255.0
+        mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).contiguous()
+
+    threshold = float(mask_threshold) / 255.0
+    mask_tensor = (mask_tensor >= threshold).float()
+    return image_tensor, mask_tensor
 
 
 def _resize_to_square_with_letterbox(
@@ -283,36 +346,43 @@ class TongueImagePointDataset(TonguePointCloudDataset):
             preload_meshes=preload_meshes,
             deterministic_sampling=deterministic_sampling,
         )
+        self.augment = augment
         self.transform = build_image_transform(dataset_cfg.image_size, augment)
-        self.mask_map = self._build_mask_map() if dataset_cfg.use_mask else {}
+        self.mask_map = (
+            self._build_mask_map()
+            if (dataset_cfg.use_mask or dataset_cfg.mask_as_channel)
+            else {}
+        )
 
     def _build_mask_map(self) -> dict[str, Path]:
         mask_dir = self.dataset_cfg.mask_dir
         if not mask_dir.exists():
+            if self.dataset_cfg.mask_as_channel:
+                raise FileNotFoundError(
+                    f"dataset.mask_as_channel=True but mask directory does not exist: {mask_dir}"
+                )
             warnings.warn(
-                f"dataset.use_mask=True but mask directory does not exist: {mask_dir}. "
+                f"Mask directory does not exist: {mask_dir}. "
                 "Fallback to raw images."
             )
             return {}
 
         mask_map = {p.stem: p for p in sorted(mask_dir.glob("*.png"))}
         if len(mask_map) == 0:
+            if self.dataset_cfg.mask_as_channel:
+                raise FileNotFoundError(
+                    f"dataset.mask_as_channel=True but no mask files were found in: {mask_dir}"
+                )
             warnings.warn(f"No mask files found in: {mask_dir}. Fallback to raw images.")
         return mask_map
 
-    def _apply_mask_preprocess(self, image: Image.Image, sample_id: str) -> Image.Image:
-        if not self.dataset_cfg.use_mask:
-            return image
-
+    def _load_mask(self, sample_id: str) -> Image.Image | None:
         mask_path = self.mask_map.get(sample_id)
         if mask_path is None or not mask_path.exists():
-            return image
+            return None
 
-        return apply_mask_preprocess_with_mask_path(
-            image=image,
-            mask_path=mask_path,
-            dataset_cfg=self.dataset_cfg,
-        )
+        with Image.open(mask_path) as mask:
+            return mask.convert("L").copy()
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         out = super().__getitem__(idx)
@@ -320,8 +390,30 @@ class TongueImagePointDataset(TonguePointCloudDataset):
 
         with Image.open(sample.image_path) as image:
             image = image.convert("RGB")
-            image = self._apply_mask_preprocess(image=image, sample_id=sample.sample_id)
-            image_tensor = self.transform(image)
+            mask = self._load_mask(sample.sample_id)
+            if self.dataset_cfg.use_mask and mask is not None:
+                image = apply_mask_preprocess_with_mask(
+                    image=image,
+                    mask=mask,
+                    dataset_cfg=self.dataset_cfg,
+                )
+
+            if self.dataset_cfg.mask_as_channel:
+                if mask is None:
+                    raise FileNotFoundError(
+                        f"dataset.mask_as_channel=True but mask not found for sample '{sample.sample_id}' "
+                        f"in {self.dataset_cfg.mask_dir}"
+                    )
+                image_tensor, mask_tensor = build_image_and_mask_tensors(
+                    image=image,
+                    mask=mask,
+                    image_size=self.dataset_cfg.image_size,
+                    augment=self.augment,
+                    mask_threshold=self.dataset_cfg.mask_threshold,
+                )
+                image_tensor = torch.cat([image_tensor, mask_tensor], dim=0)
+            else:
+                image_tensor = self.transform(image)
 
         out["image"] = image_tensor
         return out

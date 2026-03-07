@@ -28,6 +28,7 @@ class TongueImageToShape(nn.Module):
         decoder_hidden_dim: int,
         dropout: float,
         pretrained_backbone: bool = True,
+        input_channels: int = 3,
         decoder: PointDecoder | None = None,
     ) -> None:
         super().__init__()
@@ -35,6 +36,7 @@ class TongueImageToShape(nn.Module):
             latent_dim=latent_dim,
             dropout=dropout,
             pretrained_backbone=pretrained_backbone,
+            input_channels=input_channels,
         )
         self.mapper = LatentMapper(latent_dim=latent_dim, dropout=dropout)
 
