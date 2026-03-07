@@ -22,6 +22,8 @@
 - 真实世界一致性训练（无 3D）
 - 训练日志、评估、可视化、单图推理
 - 5000+ 数据二进制缓存加速（`in_the_wild_cache.npz`）
+- 二阶段按论文风格的“先监督、后弱无监督”训练节奏
+- 5000+ 变尺寸图像保比例预处理（`letterbox`，避免几何拉伸）
 
 未完全复现：
 - 论文 TongueGAN 的完整生成器-判别器链路
@@ -83,12 +85,16 @@ pip install -r requirements.txt
 ### 4.2 生成二进制缓存（只需一次，强烈推荐）
 
 ```bash
-./train.sh cache-wild TongueDB/in_the_wild_pairs.csv TongueDB/in_the_wild_cache.npz 224 1
+./train.sh cache-wild TongueDB/in_the_wild_pairs.csv TongueDB/in_the_wild_cache.npz 224 1 letterbox 16
 ```
 
 参数说明：
 - `224`：缓存图像尺寸（需与配置一致）
 - `1`：对彩色图应用 segmented mask 背景抑制
+- `letterbox`：保持长宽比后再补边到正方形（推荐，适合变尺寸数据）
+- `16`：分割阈值（抑制 JPG 黑底噪声）
+
+如果你改了 `resize_mode` / `segmented_mask_threshold` / `image_size`，必须重建缓存。
 
 ### 4.3 训练阶段一 AE
 
@@ -168,12 +174,19 @@ latent 映射器 `LatentMapper`：
 - 彩色图（可含背景抑制）
 - 分割图（黑底舌体）
 
+输入预处理：
+- 保比例缩放 + 补边（`letterbox`），避免变尺寸样本被强行拉伸
+- 分割阈值默认 `16`，减少压缩噪声误检
+
 一致性损失：
 - 仅计算 latent，不走 decoder（已优化提速）
 - `L_consistency = MSE(latent(color), latent(segmented))`
 
-总损失中叠加：
-- `L_total = L_supervised + w_consistency * L_consistency`
+总损失中叠加（论文风格课程训练）：
+- 前期仅监督训练（warmup）
+- 从 `start_epoch` 开始按 `consistency_ramp_epochs` 线性爬升权重
+- 每个 epoch 只抽样有限步数 in-the-wild（`max_steps_per_epoch`）
+- `L_total = L_supervised + w(epoch) * L_consistency`
 
 ---
 
@@ -203,7 +216,7 @@ latent 映射器 `LatentMapper`：
 - `grad_accum_steps: 2`
 - `dataset.num_points: 8192`
 - `model.latent_dim: 256`
-- `freeze_decoder: false`
+- `freeze_decoder: true`（更贴近论文二阶段“固定解码器”）
 - `decoder_lr_scale: 0.2`
 - `optimizer.lr: 8e-5`
 
@@ -228,7 +241,12 @@ in-the-wild 参数：
 - `in_the_wild.binary_cache_path: TongueDB/in_the_wild_cache.npz`
 - `in_the_wild.batch_size: 8`
 - `in_the_wild.augment: false`
-- `loss.in_the_wild_consistency: 0.2`
+- `in_the_wild.start_epoch: 20`
+- `in_the_wild.consistency_ramp_epochs: 20`
+- `in_the_wild.max_steps_per_epoch: 32`
+- `in_the_wild.resize_mode: letterbox`
+- `in_the_wild.segmented_mask_threshold: 16`
+- `loss.in_the_wild_consistency: 0.08`
 
 ---
 
@@ -280,11 +298,14 @@ in-the-wild 参数：
 ./run.sh render runs/predictions/03903.000052_pred.ply
 ```
 
+说明：若 checkpoint 配置启用了 `dataset.use_mask=true`，且存在同名 mask  
+（`TongueDB/masks/<sample_id>.png`），推理会自动复用训练同款 mask 预处理。
+
 ---
 
 ## 10. 能力边界与下一步
 
-当前版本已能稳定训练并利用你新增数据显著增强泛化，但仍属于工程复现路线。
+当前版本已能稳定训练并利用你新增数据进行论文风格适配，但仍属于工程复现路线。
 
 如果后续目标是进一步逼近论文完整链路，下一步建议优先做：
 1. TongueGAN 完整生成器-判别器训练分支。

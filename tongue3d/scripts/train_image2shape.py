@@ -123,6 +123,23 @@ def compute_loss(
     }
 
 
+def compute_in_the_wild_weight(cfg, epoch: int) -> float:
+    if not cfg.in_the_wild.enabled:
+        return 0.0
+
+    start_epoch = int(cfg.in_the_wild.start_epoch)
+    if epoch < start_epoch:
+        return 0.0
+
+    base_weight = float(cfg.loss.in_the_wild_consistency)
+    ramp_epochs = int(cfg.in_the_wild.consistency_ramp_epochs)
+    if ramp_epochs <= 0:
+        return base_weight
+
+    progress = float(epoch - start_epoch + 1) / float(ramp_epochs)
+    return base_weight * max(0.0, min(1.0, progress))
+
+
 def run_epoch(
     model,
     ae,
@@ -326,6 +343,12 @@ def main() -> None:
         f"[loader] train_workers={train_loader.num_workers} val_workers={val_loader.num_workers} "
         f"batch_size={cfg.batch_size}"
     )
+    if cfg.in_the_wild.enabled and not cfg.freeze_decoder:
+        print(
+            "[warn] in_the_wild is enabled while freeze_decoder=false. "
+            "This is less aligned with paper-style stage2 training and may hurt geometry stability."
+        )
+
     in_the_wild_loader = None
     if cfg.in_the_wild.enabled:
         in_the_wild_ds = None
@@ -334,6 +357,9 @@ def main() -> None:
                 cache_path=cfg.in_the_wild.binary_cache_path,
                 image_size=cfg.dataset.image_size,
                 augment=cfg.in_the_wild.augment,
+                expected_use_segmented_mask_preprocess=cfg.in_the_wild.use_segmented_mask_preprocess,
+                expected_resize_mode=cfg.in_the_wild.resize_mode,
+                expected_segmented_mask_threshold=cfg.in_the_wild.segmented_mask_threshold,
             )
             print(
                 f"[in_the_wild] use binary cache: {cfg.in_the_wild.binary_cache_path} "
@@ -356,6 +382,8 @@ def main() -> None:
                 image_size=cfg.dataset.image_size,
                 augment=cfg.in_the_wild.augment,
                 use_segmented_mask_preprocess=cfg.in_the_wild.use_segmented_mask_preprocess,
+                resize_mode=cfg.in_the_wild.resize_mode,
+                segmented_mask_threshold=cfg.in_the_wild.segmented_mask_threshold,
             )
 
         in_the_wild_loader = make_loader(
@@ -367,6 +395,14 @@ def main() -> None:
         print(
             f"[in_the_wild] loaded {len(in_the_wild_ds)} samples "
             f"(batch_size={cfg.in_the_wild.batch_size}, workers={in_the_wild_loader.num_workers})"
+        )
+        print(
+            "[in_the_wild] "
+            f"start_epoch={int(cfg.in_the_wild.start_epoch)} "
+            f"ramp_epochs={int(cfg.in_the_wild.consistency_ramp_epochs)} "
+            f"max_steps_per_epoch={int(cfg.in_the_wild.max_steps_per_epoch)} "
+            f"resize_mode={cfg.in_the_wild.resize_mode} "
+            f"mask_threshold={int(cfg.in_the_wild.segmented_mask_threshold)}"
         )
 
     model_kwargs = ae_ckpt.get("model_kwargs", {})
@@ -411,11 +447,7 @@ def main() -> None:
     for epoch in range(1, cfg.epochs + 1):
         epoch_start = time.perf_counter()
 
-        in_the_wild_weight = (
-            float(cfg.loss.in_the_wild_consistency)
-            if cfg.in_the_wild.enabled and epoch >= int(cfg.in_the_wild.start_epoch)
-            else 0.0
-        )
+        in_the_wild_weight = compute_in_the_wild_weight(cfg=cfg, epoch=epoch)
         train_metrics = run_epoch(
             model,
             ae_model,

@@ -119,9 +119,12 @@ class InTheWildConfig(BaseModel):
     binary_cache_path: Path = Path("TongueDB/in_the_wild_cache.npz")
     augment: bool = False
     batch_size: int = Field(default=8, ge=1)
-    start_epoch: int = Field(default=1, ge=1)
-    max_steps_per_epoch: int = Field(default=0, ge=0)
+    start_epoch: int = Field(default=20, ge=1)
+    consistency_ramp_epochs: int = Field(default=20, ge=0)
+    max_steps_per_epoch: int = Field(default=32, ge=0)
     use_segmented_mask_preprocess: bool = True
+    segmented_mask_threshold: int = Field(default=16, ge=0, le=255)
+    resize_mode: Literal["direct", "letterbox"] = "letterbox"
 
 
 class AutoencoderTrainConfig(BaseModel):

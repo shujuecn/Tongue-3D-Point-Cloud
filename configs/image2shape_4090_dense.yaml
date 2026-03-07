@@ -6,7 +6,7 @@ batch_size: 8
 grad_accum_steps: 2
 grad_clip_norm: 1.0
 autoencoder_checkpoint: runs/ae_4090_dense/best.pt
-freeze_decoder: false
+freeze_decoder: true
 decoder_lr_scale: 0.2
 require_torchvision: true
 
@@ -74,7 +74,7 @@ loss:
   edge: 0.03
   repulsion: 0.02
   latent: 1.2
-  in_the_wild_consistency: 0.2
+  in_the_wild_consistency: 0.08
 
 in_the_wild:
   enabled: true
@@ -83,6 +83,9 @@ in_the_wild:
   binary_cache_path: TongueDB/in_the_wild_cache.npz
   augment: false
   batch_size: 8
-  start_epoch: 1
-  max_steps_per_epoch: 0
+  start_epoch: 20
+  consistency_ramp_epochs: 20
+  max_steps_per_epoch: 32
   use_segmented_mask_preprocess: true
+  segmented_mask_threshold: 16
+  resize_mode: letterbox

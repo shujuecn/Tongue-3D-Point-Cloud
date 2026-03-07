@@ -74,6 +74,128 @@ def _fallback_transform(image_size: int):
     return _apply
 
 
+def _resize_to_square_with_letterbox(
+    image: Image.Image,
+    image_size: int,
+    resample: int,
+) -> Image.Image:
+    if image.size == (image_size, image_size):
+        return image
+
+    src_w, src_h = image.size
+    scale = min(image_size / max(1, src_w), image_size / max(1, src_h))
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+
+    resized = image.resize((new_w, new_h), resample=resample)
+    canvas = Image.new(image.mode, (image_size, image_size), color=0)
+    left = (image_size - new_w) // 2
+    top = (image_size - new_h) // 2
+    canvas.paste(resized, (left, top))
+    return canvas
+
+
+def _resize_rgb_hwc(
+    rgb_hwc_uint8: np.ndarray,
+    image_size: int,
+    resize_mode: str,
+    resample: int,
+) -> np.ndarray:
+    image = Image.fromarray(rgb_hwc_uint8, mode="RGB")
+    if resize_mode == "direct":
+        if image.size != (image_size, image_size):
+            image = image.resize((image_size, image_size), resample=resample)
+    elif resize_mode == "letterbox":
+        image = _resize_to_square_with_letterbox(image, image_size=image_size, resample=resample)
+    else:
+        raise ValueError(f"Unsupported resize_mode='{resize_mode}'. Expected 'direct' or 'letterbox'.")
+    return np.asarray(image, dtype=np.uint8)
+
+
+def mask_from_segmented_rgb(segmented_rgb: np.ndarray, threshold: int = 16) -> np.ndarray:
+    gray = segmented_rgb.max(axis=2)
+    return gray >= int(threshold)
+
+
+def prepare_in_the_wild_pair_arrays(
+    color_rgb: np.ndarray,
+    segmented_rgb: np.ndarray,
+    image_size: int,
+    use_segmented_mask_preprocess: bool,
+    resize_mode: str = "letterbox",
+    segmented_mask_threshold: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    if segmented_rgb.shape[:2] != color_rgb.shape[:2]:
+        segmented_rgb = np.asarray(
+            Image.fromarray(segmented_rgb, mode="RGB").resize(
+                (color_rgb.shape[1], color_rgb.shape[0]),
+                resample=Image.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
+
+    color_np = _resize_rgb_hwc(
+        color_rgb,
+        image_size=image_size,
+        resize_mode=resize_mode,
+        resample=Image.BILINEAR,
+    )
+    seg_np = _resize_rgb_hwc(
+        segmented_rgb,
+        image_size=image_size,
+        resize_mode=resize_mode,
+        resample=Image.NEAREST,
+    )
+
+    if use_segmented_mask_preprocess:
+        tongue_mask = mask_from_segmented_rgb(seg_np, threshold=segmented_mask_threshold)
+        color_np = color_np.copy()
+        color_np[~tongue_mask] = 0
+
+    return color_np, seg_np
+
+
+def apply_mask_preprocess_with_mask(
+    image: Image.Image,
+    mask: Image.Image,
+    dataset_cfg: DatasetConfig,
+) -> Image.Image:
+    mask = mask.convert("L")
+    if mask.size != image.size:
+        mask = mask.resize(image.size, resample=Image.NEAREST)
+
+    mask_np = np.asarray(mask, dtype=np.uint8) >= int(dataset_cfg.mask_threshold)
+    if not np.any(mask_np):
+        return image
+
+    if dataset_cfg.mask_background_zero:
+        image_np = np.asarray(image, dtype=np.uint8).copy()
+        image_np[~mask_np] = 0
+        image = Image.fromarray(image_np, mode="RGB")
+
+    if dataset_cfg.mask_crop:
+        ys, xs = np.where(mask_np)
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+        margin = int(max(image.width, image.height) * float(dataset_cfg.mask_margin_ratio))
+        x0 = max(0, x0 - margin)
+        y0 = max(0, y0 - margin)
+        x1 = min(image.width - 1, x1 + margin)
+        y1 = min(image.height - 1, y1 + margin)
+        if x1 > x0 and y1 > y0:
+            image = image.crop((x0, y0, x1 + 1, y1 + 1))
+    return image
+
+
+def apply_mask_preprocess_with_mask_path(
+    image: Image.Image,
+    mask_path: Path,
+    dataset_cfg: DatasetConfig,
+) -> Image.Image:
+    with Image.open(mask_path) as mask:
+        return apply_mask_preprocess_with_mask(image=image, mask=mask, dataset_cfg=dataset_cfg)
+
+
 class TonguePointCloudDataset(Dataset):
     def __init__(
         self,
@@ -186,32 +308,11 @@ class TongueImagePointDataset(TonguePointCloudDataset):
         if mask_path is None or not mask_path.exists():
             return image
 
-        with Image.open(mask_path) as mask:
-            mask = mask.convert("L")
-            if mask.size != image.size:
-                mask = mask.resize(image.size, resample=Image.NEAREST)
-
-            mask_np = np.asarray(mask, dtype=np.uint8) >= int(self.dataset_cfg.mask_threshold)
-            if not np.any(mask_np):
-                return image
-
-            if self.dataset_cfg.mask_background_zero:
-                image_np = np.asarray(image, dtype=np.uint8).copy()
-                image_np[~mask_np] = 0
-                image = Image.fromarray(image_np, mode="RGB")
-
-            if self.dataset_cfg.mask_crop:
-                ys, xs = np.where(mask_np)
-                x0, x1 = int(xs.min()), int(xs.max())
-                y0, y1 = int(ys.min()), int(ys.max())
-                margin = int(max(image.width, image.height) * float(self.dataset_cfg.mask_margin_ratio))
-                x0 = max(0, x0 - margin)
-                y0 = max(0, y0 - margin)
-                x1 = min(image.width - 1, x1 + margin)
-                y1 = min(image.height - 1, y1 + margin)
-                if x1 > x0 and y1 > y0:
-                    image = image.crop((x0, y0, x1 + 1, y1 + 1))
-        return image
+        return apply_mask_preprocess_with_mask_path(
+            image=image,
+            mask_path=mask_path,
+            dataset_cfg=self.dataset_cfg,
+        )
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         out = super().__getitem__(idx)
@@ -265,18 +366,18 @@ class TongueInTheWildPairDataset(Dataset):
         image_size: int,
         augment: bool = False,
         use_segmented_mask_preprocess: bool = True,
+        resize_mode: str = "letterbox",
+        segmented_mask_threshold: int = 16,
     ) -> None:
         self.samples = samples
+        self.image_size = int(image_size)
         self.transform = build_image_transform(image_size=image_size, augment=augment)
         self.use_segmented_mask_preprocess = bool(use_segmented_mask_preprocess)
+        self.resize_mode = str(resize_mode)
+        self.segmented_mask_threshold = int(segmented_mask_threshold)
 
     def __len__(self) -> int:
         return len(self.samples)
-
-    @staticmethod
-    def _mask_from_segmented(segmented_rgb: np.ndarray, threshold: int = 5) -> np.ndarray:
-        gray = segmented_rgb.max(axis=2)
-        return gray >= threshold
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self.samples[idx]
@@ -289,19 +390,14 @@ class TongueInTheWildPairDataset(Dataset):
             seg_im = seg_im.convert("RGB")
             seg_np = np.asarray(seg_im, dtype=np.uint8)
 
-        if seg_np.shape[:2] != color_np.shape[:2]:
-            seg_np = np.asarray(
-                Image.fromarray(seg_np, mode="RGB").resize(
-                    (color_np.shape[1], color_np.shape[0]),
-                    resample=Image.BILINEAR,
-                ),
-                dtype=np.uint8,
-            )
-
-        if self.use_segmented_mask_preprocess:
-            tongue_mask = self._mask_from_segmented(seg_np)
-            color_np = color_np.copy()
-            color_np[~tongue_mask] = 0
+        color_np, seg_np = prepare_in_the_wild_pair_arrays(
+            color_rgb=color_np,
+            segmented_rgb=seg_np,
+            image_size=self.image_size,
+            use_segmented_mask_preprocess=self.use_segmented_mask_preprocess,
+            resize_mode=self.resize_mode,
+            segmented_mask_threshold=self.segmented_mask_threshold,
+        )
 
         color_tensor = self.transform(Image.fromarray(color_np, mode="RGB"))
         segmented_tensor = self.transform(Image.fromarray(seg_np, mode="RGB"))
@@ -318,6 +414,9 @@ class TongueInTheWildCacheDataset(Dataset):
         cache_path: Path,
         image_size: int,
         augment: bool = False,
+        expected_use_segmented_mask_preprocess: bool | None = None,
+        expected_resize_mode: str | None = None,
+        expected_segmented_mask_threshold: int | None = None,
     ) -> None:
         self.cache_path = cache_path
         pack = np.load(cache_path, allow_pickle=False)
@@ -325,6 +424,15 @@ class TongueInTheWildCacheDataset(Dataset):
         self.color = pack["color"]
         self.segmented = pack["segmented"]
         self.cache_image_size = int(pack["image_size"][0]) if "image_size" in pack else int(image_size)
+        self.cache_use_segmented_mask_preprocess = (
+            bool(int(pack["use_segmented_mask_preprocess"][0]))
+            if "use_segmented_mask_preprocess" in pack
+            else None
+        )
+        self.cache_resize_mode = str(pack["resize_mode"][0]) if "resize_mode" in pack else None
+        self.cache_segmented_mask_threshold = (
+            int(pack["segmented_mask_threshold"][0]) if "segmented_mask_threshold" in pack else None
+        )
 
         if self.color.ndim != 4 or self.color.shape[-1] != 3:
             raise ValueError(f"Invalid color tensor shape in cache: {self.color.shape}")
@@ -337,6 +445,47 @@ class TongueInTheWildCacheDataset(Dataset):
                 f"Cache image_size mismatch: cache={self.color.shape[1]} requested={image_size}. "
                 "Please rebuild cache with the target image_size."
             )
+
+        if expected_use_segmented_mask_preprocess is not None:
+            if self.cache_use_segmented_mask_preprocess is None:
+                warnings.warn(
+                    "Cache metadata missing 'use_segmented_mask_preprocess'; "
+                    "consider rebuilding cache for strict config consistency."
+                )
+            elif bool(expected_use_segmented_mask_preprocess) != self.cache_use_segmented_mask_preprocess:
+                raise ValueError(
+                    "Cache metadata mismatch for use_segmented_mask_preprocess. "
+                    f"cache={self.cache_use_segmented_mask_preprocess}, "
+                    f"config={bool(expected_use_segmented_mask_preprocess)}. "
+                    "Please rebuild cache via ./train.sh cache-wild ..."
+                )
+
+        if expected_resize_mode is not None:
+            if self.cache_resize_mode is None:
+                warnings.warn(
+                    "Cache metadata missing 'resize_mode'; consider rebuilding cache "
+                    "to avoid preprocessing mismatch."
+                )
+            elif str(expected_resize_mode) != self.cache_resize_mode:
+                raise ValueError(
+                    "Cache metadata mismatch for resize_mode. "
+                    f"cache={self.cache_resize_mode}, config={expected_resize_mode}. "
+                    "Please rebuild cache via ./train.sh cache-wild ..."
+                )
+
+        if expected_segmented_mask_threshold is not None:
+            if self.cache_segmented_mask_threshold is None:
+                warnings.warn(
+                    "Cache metadata missing 'segmented_mask_threshold'; "
+                    "consider rebuilding cache for strict config consistency."
+                )
+            elif int(expected_segmented_mask_threshold) != self.cache_segmented_mask_threshold:
+                raise ValueError(
+                    "Cache metadata mismatch for segmented_mask_threshold. "
+                    f"cache={self.cache_segmented_mask_threshold}, "
+                    f"config={int(expected_segmented_mask_threshold)}. "
+                    "Please rebuild cache via ./train.sh cache-wild ..."
+                )
 
         self.transform = build_image_transform(image_size=image_size, augment=augment)
         self._mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)

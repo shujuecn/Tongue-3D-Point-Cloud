@@ -9,7 +9,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   ./train.sh prepare-wild <color_dir> <segmented_dir> [output_csv]
-  ./train.sh cache-wild [manifest_csv] [output_npz] [image_size] [use_segmented_mask_preprocess]
+  ./train.sh cache-wild [manifest_csv] [output_npz] [image_size] [use_segmented_mask_preprocess] [resize_mode] [segmented_mask_threshold]
   ./train.sh ae [ae_config]
   ./train.sh img [img_config] [ae_checkpoint]
   ./train.sh full [ae_config] [img_config] [ae_checkpoint]
@@ -120,11 +120,13 @@ cmd_cache_wild() {
   local output_npz="${2:-TongueDB/in_the_wild_cache.npz}"
   local image_size="${3:-224}"
   local use_segmented_mask_preprocess="${4:-1}"
+  local resize_mode="${5:-letterbox}"
+  local segmented_mask_threshold="${6:-16}"
   require_file "$manifest_csv"
 
-  echo "[cache-wild] manifest=$manifest_csv output=$output_npz image_size=$image_size mask=$use_segmented_mask_preprocess"
+  echo "[cache-wild] manifest=$manifest_csv output=$output_npz image_size=$image_size mask=$use_segmented_mask_preprocess resize_mode=$resize_mode threshold=$segmented_mask_threshold"
   python -m tongue3d.scripts.build_in_the_wild_cache \
-    "$manifest_csv" "$output_npz" "$image_size" "$use_segmented_mask_preprocess"
+    "$manifest_csv" "$output_npz" "$image_size" "$use_segmented_mask_preprocess" "$resize_mode" "$segmented_mask_threshold"
 }
 
 cmd_train_ae() {

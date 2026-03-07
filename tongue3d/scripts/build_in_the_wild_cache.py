@@ -6,54 +6,70 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from tongue3d.data.dataset import InTheWildPairSample, load_in_the_wild_manifest
+from tongue3d.data.dataset import (
+    InTheWildPairSample,
+    load_in_the_wild_manifest,
+    prepare_in_the_wild_pair_arrays,
+)
 
 
-def parse_cli() -> tuple[Path, Path, int, bool]:
+def parse_cli() -> tuple[Path, Path, int, bool, str, int]:
     if len(sys.argv) < 2:
         raise SystemExit(
             "Usage: python -m tongue3d.scripts.build_in_the_wild_cache "
-            "<manifest_csv> [output_npz] [image_size=224] [use_segmented_mask_preprocess=1]"
+            "<manifest_csv> [output_npz] [image_size=224] [use_segmented_mask_preprocess=1] "
+            "[resize_mode=letterbox] [segmented_mask_threshold=16]"
         )
 
     manifest_csv = Path(sys.argv[1])
     output_npz = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("TongueDB/in_the_wild_cache.npz")
     image_size = int(sys.argv[3]) if len(sys.argv) > 3 else 224
     use_segmented_mask_preprocess = bool(int(sys.argv[4])) if len(sys.argv) > 4 else True
-    return manifest_csv, output_npz, image_size, use_segmented_mask_preprocess
-
-
-def _load_resized_rgb(path: Path, image_size: int) -> np.ndarray:
-    with Image.open(path) as im:
-        im = im.convert("RGB")
-        if im.size != (image_size, image_size):
-            im = im.resize((image_size, image_size), resample=Image.BILINEAR)
-        return np.asarray(im, dtype=np.uint8)
-
-
-def _mask_from_segmented(segmented_rgb: np.ndarray, threshold: int = 5) -> np.ndarray:
-    gray = segmented_rgb.max(axis=2)
-    return gray >= threshold
+    resize_mode = str(sys.argv[5]) if len(sys.argv) > 5 else "letterbox"
+    segmented_mask_threshold = int(sys.argv[6]) if len(sys.argv) > 6 else 16
+    return (
+        manifest_csv,
+        output_npz,
+        image_size,
+        use_segmented_mask_preprocess,
+        resize_mode,
+        segmented_mask_threshold,
+    )
 
 
 def _process_pair(
     sample: InTheWildPairSample,
     image_size: int,
     use_segmented_mask_preprocess: bool,
+    resize_mode: str,
+    segmented_mask_threshold: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    color_np = _load_resized_rgb(sample.color_path, image_size=image_size)
-    seg_np = _load_resized_rgb(sample.segmented_path, image_size=image_size)
+    with Image.open(sample.color_path) as color_im:
+        color_np = np.asarray(color_im.convert("RGB"), dtype=np.uint8)
+    with Image.open(sample.segmented_path) as seg_im:
+        seg_np = np.asarray(seg_im.convert("RGB"), dtype=np.uint8)
 
-    if use_segmented_mask_preprocess:
-        mask = _mask_from_segmented(seg_np)
-        color_np = color_np.copy()
-        color_np[~mask] = 0
-
-    return color_np, seg_np
+    return prepare_in_the_wild_pair_arrays(
+        color_rgb=color_np,
+        segmented_rgb=seg_np,
+        image_size=image_size,
+        use_segmented_mask_preprocess=use_segmented_mask_preprocess,
+        resize_mode=resize_mode,
+        segmented_mask_threshold=segmented_mask_threshold,
+    )
 
 
 def main() -> None:
-    manifest_csv, output_npz, image_size, use_segmented_mask_preprocess = parse_cli()
+    (
+        manifest_csv,
+        output_npz,
+        image_size,
+        use_segmented_mask_preprocess,
+        resize_mode,
+        segmented_mask_threshold,
+    ) = parse_cli()
+    if resize_mode not in {"direct", "letterbox"}:
+        raise ValueError(f"resize_mode must be 'direct' or 'letterbox', got: {resize_mode}")
     samples = load_in_the_wild_manifest(manifest_csv)
     n = len(samples)
 
@@ -74,6 +90,8 @@ def main() -> None:
             sample=sample,
             image_size=image_size,
             use_segmented_mask_preprocess=use_segmented_mask_preprocess,
+            resize_mode=resize_mode,
+            segmented_mask_threshold=segmented_mask_threshold,
         )
         color[i] = c
         segmented[i] = s
@@ -90,6 +108,8 @@ def main() -> None:
             [1 if use_segmented_mask_preprocess else 0],
             dtype=np.int32,
         ),
+        resize_mode=np.asarray([resize_mode]),
+        segmented_mask_threshold=np.asarray([segmented_mask_threshold], dtype=np.int32),
     )
 
     mb = output_npz.stat().st_size / (1024 * 1024)
@@ -97,9 +117,10 @@ def main() -> None:
     print(f"Samples: {n}")
     print(f"Image size: {image_size}")
     print(f"Masked color: {use_segmented_mask_preprocess}")
+    print(f"Resize mode: {resize_mode}")
+    print(f"Segmented mask threshold: {segmented_mask_threshold}")
     print(f"File size: {mb:.2f} MB")
 
 
 if __name__ == "__main__":
     main()
-

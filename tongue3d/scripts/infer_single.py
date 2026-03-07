@@ -8,10 +8,13 @@ import numpy as np
 import torch
 from PIL import Image
 
-from tongue3d.config import resolve_device
+from tongue3d.config import DatasetConfig, resolve_device
 from tongue3d.models import TongueImageToShape
 from tongue3d.utils import denormalize_points, load_checkpoint, write_pointcloud_ply
-from tongue3d.data.dataset import build_image_transform
+from tongue3d.data.dataset import (
+    apply_mask_preprocess_with_mask_path,
+    build_image_transform,
+)
 
 
 def parse_cli() -> tuple[Path, str, Path | None, Path | None]:
@@ -79,11 +82,21 @@ def resolve_image_path(query: str, split_csv: Path | None) -> tuple[Path, str]:
     return image_path, str(best_row["sample_id"]).strip()
 
 
+def infer_mask_path(sample_id: str, dataset_cfg: DatasetConfig) -> Path | None:
+    if not dataset_cfg.use_mask:
+        return None
+    candidate = dataset_cfg.mask_dir / f"{sample_id}.png"
+    if candidate.exists():
+        return candidate
+    return None
+
+
 def main() -> None:
     ckpt_path, query, output_path, split_csv_arg = parse_cli()
 
     checkpoint = load_checkpoint(ckpt_path, map_location="cpu")
     cfg = checkpoint.get("config", {})
+    dataset_cfg = DatasetConfig.model_validate(cfg.get("dataset", {}))
     model_kwargs = checkpoint.get("model_kwargs", {})
     image_size = int(cfg.get("dataset", {}).get("image_size", 224))
 
@@ -115,8 +128,15 @@ def main() -> None:
     model.eval()
 
     transform = build_image_transform(image_size=image_size, augment=False)
+    mask_path = infer_mask_path(sample_id=sample_id, dataset_cfg=dataset_cfg)
     with Image.open(image_path) as image:
         image = image.convert("RGB")
+        if mask_path is not None:
+            image = apply_mask_preprocess_with_mask_path(
+                image=image,
+                mask_path=mask_path,
+                dataset_cfg=dataset_cfg,
+            )
         image_tensor = transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -129,6 +149,8 @@ def main() -> None:
     write_pointcloud_ply(output_path, points, normals)
     print(f"Saved reconstruction to: {output_path}")
     print(f"Input image: {image_path}")
+    if mask_path is not None:
+        print(f"Mask path: {mask_path}")
     if split_csv is not None:
         print(f"Split CSV: {split_csv}")
 
