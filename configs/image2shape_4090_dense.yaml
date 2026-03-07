@@ -6,7 +6,7 @@ batch_size: 8
 grad_accum_steps: 2
 grad_clip_norm: 1.0
 autoencoder_checkpoint: runs/ae_4090_dense/best.pt
-freeze_decoder: true
+freeze_decoder: false
 decoder_lr_scale: 0.2
 require_torchvision: true
 
@@ -19,8 +19,8 @@ dataset:
   image_size: 224
   preload_meshes: true
   augment: true
-  use_mask: true
-  mask_crop: true
+  use_mask: false
+  mask_crop: false
   mask_background_zero: true
   mask_threshold: 127
   mask_margin_ratio: 0.08
@@ -77,7 +77,7 @@ loss:
   in_the_wild_consistency: 0.08
 
 in_the_wild:
-  enabled: true
+  enabled: false
   manifest_csv: TongueDB/in_the_wild_pairs.csv
   use_binary_cache: true
   binary_cache_path: TongueDB/in_the_wild_cache.npz
